@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Entorno virtual
+venv/
+env/
+.venv/
+
+# Variables de entorno (NUNCA subir .env con credenciales reales)
+.env
+!.env.example
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+staticfiles/
+media/
+
+# Tests
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentación
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+.windsurf/
+docs/

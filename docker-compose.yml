@@ -1,0 +1,77 @@
+# docker-compose.yml — Capital Humano
+# Base común a todos los entornos: BD + Redis + Web + Celery.
+# Overrides: docker-compose.dev.yml (local) / docker-compose.prod.yml (servidor).
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: capital-humano-db
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: capital-humano-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  web:
+    build: .
+    container_name: capital-humano-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: web
+      TMPDIR: /app/tmp
+    volumes:
+      - shared_tmp:/app/tmp
+      - media_files:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery:
+    build: .
+    container_name: capital-humano-celery
+    restart: unless-stopped
+    command: ["celery", "-A", "config", "worker", "-l", "info", "--concurrency", "4"]
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: celery
+      TMPDIR: /app/tmp
+    volumes:
+      - shared_tmp:/app/tmp
+      - media_files:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+volumes:
+  postgres_data:   # datos de PostgreSQL — sobrevive a down/up y reinicios
+  shared_tmp:      # temporales compartidos entre web y celery
+  media_files:     # uploads de usuarios

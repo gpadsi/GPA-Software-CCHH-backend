@@ -1,0 +1,21 @@
+# docker-compose.dev.yml — Override de DESARROLLO
+# runserver con hot-reload (bind mount del código) + celery en modo --pool=solo
+# (necesario en Windows/WSL; en Linux también funciona sin problema).
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+
+services:
+  web:
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+
+  celery:
+    command: ["celery", "-A", "config", "worker", "-l", "info", "--pool=solo"]
+    volumes:
+      - .:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev

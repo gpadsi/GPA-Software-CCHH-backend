@@ -1,0 +1,39 @@
+# docker-compose.prod.yml — Override de PRODUCCIÓN (servidor dedicado, todo en Docker)
+# Agrega nginx como reverse proxy + estáticos/medios, y cambia los volúmenes de
+# web/celery de bind-mount (dev) a volúmenes nombrados compartidos con nginx.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Requiere un .env de producción con DJANGO_SETTINGS_MODULE=config.settings.prod
+# IMPORTANTE: config.settings.prod fuerza cookies seguras → login solo funciona
+# sobre HTTPS. Habilitar TLS en nginx (ver nginx/capital_humano.conf).
+
+services:
+  web:
+    volumes:
+      - static_files:/app/staticfiles
+      - media_files:/app/media
+
+  celery:
+    volumes:
+      - media_files:/app/media
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: capital-humano-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # - "443:443"   # descomentar al habilitar TLS
+    volumes:
+      - ./nginx/capital_humano.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_files:/app/staticfiles:ro
+      - media_files:/app/media:ro
+      # - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - web
+
+volumes:
+  static_files:
+  media_files:

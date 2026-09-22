@@ -1,0 +1,22 @@
+.git
+.gitignore
+.dockerignore
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.env
+media/
+staticfiles/
+*.md
+.vscode/
+.idea/
+
+# IA / Agentes — nunca deben entrar ni al repo ni a la imagen
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+.windsurf/
+docs/

@@ -1,0 +1,26 @@
+# Core
+Django>=5.1,<5.2
+djangorestframework>=3.15,<3.16
+psycopg2-binary>=2.9,<3.0
+
+# Auth (JWT)
+djangorestframework-simplejwt>=5.3,<6.0
+
+# Filtrado y utilidades
+django-filter>=24.0,<25.0
+python-decouple>=3.8,<4.0
+
+# Async / Celery
+celery[redis]>=5.4,<6.0
+
+# Admin UI
+django-jazzmin>=3.0,<4.0
+
+# Documentación API (OpenAPI 3.0)
+drf-spectacular>=0.29,<1.0
+
+# CORS
+django-cors-headers>=4.0,<5.0
+
+# Producción
+gunicorn>=22.0,<23.0
