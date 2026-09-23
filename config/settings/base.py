@@ -34,6 +34,11 @@ THIRD_PARTY_APPS = [
 LOCAL_APPS = [
     "apps.core",
     "apps.users",
+    "apps.organizations",
+    "apps.locations",
+    "apps.persons",
+    "apps.positions",
+    "apps.employment",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -138,6 +143,26 @@ SPECTACULAR_SETTINGS = {
             "name": "core",
             "description": "**Utilidades del sistema** — Archivos adjuntos genéricos, reutilizables por cualquier entidad.",
         },
+        {
+            "name": "organizations",
+            "description": "**Estructura organizacional** — Niveles, nodos y empresas de Grupo GPA.",
+        },
+        {
+            "name": "locations",
+            "description": "**Ubicaciones físicas** — Sitios, naves y áreas; dimensión física, independiente del organigrama.",
+        },
+        {
+            "name": "persons",
+            "description": "**Personas** — Datos personales, contactos de urgencia y perfil médico, independientes de la relación laboral.",
+        },
+        {
+            "name": "positions",
+            "description": "**Posiciones** — Plazas (vacantes u ocupadas) dentro de la estructura, con su ciclo de reclutamiento.",
+        },
+        {
+            "name": "employment",
+            "description": "**Empleo** — Relación laboral: Empleado, historial de contratos y bajas, historial salarial.",
+        },
     ],
     "SORT_OPERATIONS": False,
     "SERVE_INCLUDE_SCHEMA": False,
@@ -207,13 +232,43 @@ JAZZMIN_SETTINGS = {
     "navigation_expanded": True,
     # Orden de las secciones en el sidebar — se va ampliando conforme se
     # agreguen apps de dominio (Persona, Puesto, ...).
-    "order_with_respect_to": ["users", "core", "auth"],
+    "order_with_respect_to": [
+        "users", "persons", "employment", "positions", "locations",
+        "organizations", "core", "auth",
+    ],
     "icons": {
         "auth": "fas fa-users-cog",
         "auth.group": "fas fa-users",
         "users.user": "fas fa-user",
+        "users.userrole": "fas fa-user-tag",
+        "organizations": "fas fa-sitemap",
+        "organizations.tenant": "fas fa-building-flag",
+        "organizations.organizationallevel": "fas fa-layer-group",
+        "organizations.organizationnode": "fas fa-sitemap",
+        "organizations.company": "fas fa-industry",
         "core.attachment": "fas fa-paperclip",
         "core.documenttype": "fas fa-tags",
+        "locations.ubicacion": "fas fa-map-marker-alt",
+        "locations.nave": "fas fa-warehouse",
+        "locations.area": "fas fa-th-large",
+        "persons.persona": "fas fa-id-card",
+        "persons.contactourgencia": "fas fa-phone-volume",
+        "persons.perfilmedico": "fas fa-notes-medical",
+        "persons.genero": "fas fa-venus-mars",
+        "persons.estadocivil": "fas fa-ring",
+        "persons.escolaridad": "fas fa-graduation-cap",
+        "persons.tiposangre": "fas fa-tint",
+        "positions.posicion": "fas fa-briefcase",
+        "positions.puesto": "fas fa-id-badge",
+        "positions.alcancedeposicion": "fas fa-bullseye",
+        "positions.tipoposicion": "fas fa-clipboard-list",
+        "positions.tiporequisicion": "fas fa-file-signature",
+        "positions.estatusposicion": "fas fa-toggle-on",
+        "employment.empleado": "fas fa-user-tie",
+        "employment.contrato": "fas fa-file-contract",
+        "employment.historialsalarial": "fas fa-money-check-alt",
+        "employment.origenbaja": "fas fa-sign-out-alt",
+        "employment.causabaja": "fas fa-list-ul",
     },
     "default_icon_parents": "fas fa-chevron-circle-right",
     "default_icon_children": "fas fa-circle",

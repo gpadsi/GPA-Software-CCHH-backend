@@ -24,6 +24,11 @@ urlpatterns = [
 
     path("api/v1/", include("apps.users.urls")),
     path("api/v1/core/", include("apps.core.urls")),
+    path("api/v1/organizations/", include("apps.organizations.urls")),
+    path("api/v1/locations/", include("apps.locations.urls")),
+    path("api/v1/persons/", include("apps.persons.urls")),
+    path("api/v1/positions/", include("apps.positions.urls")),
+    path("api/v1/employment/", include("apps.employment.urls")),
 ]
 
 # Solo desarrollo: sirve CSS/JS del admin y archivos media mediante Django.

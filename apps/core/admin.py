@@ -6,20 +6,24 @@ from django.db.models import Q
 from apps.core.models import Attachment, DocumentType
 
 
-class DocumentTypeAdminForm(forms.ModelForm):
+def catalog_form(model):
     """
-    "Código" se muestra readonly (no se puede escribir a mano) y Django lo va
-    generando en vivo, letra por letra, a partir de "Nombre" — vía
-    `prepopulated_fields` de abajo. `readonly` (atributo HTML) y no
-    `disabled`: readonly bloquea la edición manual pero SÍ manda su valor al
-    guardar; `disabled` no lo mandaría y el campo llegaría vacío al servidor.
+    Fábrica del Form de un catálogo NamedCatalog: "Código" se muestra
+    readonly (no se puede escribir a mano) y Django lo va generando en vivo,
+    letra por letra, a partir de "Nombre" vía `prepopulated_fields` del
+    ModelAdmin. `readonly` (atributo HTML) y no `disabled`: readonly bloquea
+    la edición manual pero SÍ manda su valor al guardar; `disabled` no lo
+    mandaría y el campo llegaría vacío al servidor.
+
+    Existe como fábrica porque el Form de Django exige `Meta.model` propio
+    por cada modelo — no se puede compartir una sola clase entre catálogos.
     """
-    class Meta:
-        model = DocumentType
-        fields = "__all__"
-        widgets = {
-            "code": forms.TextInput(attrs={"readonly": "readonly"}),
-        }
+    meta = type("Meta", (), {
+        "model": model,
+        "fields": "__all__",
+        "widgets": {"code": forms.TextInput(attrs={"readonly": "readonly"})},
+    })
+    return type(f"{model.__name__}AdminForm", (forms.ModelForm,), {"Meta": meta})
 
 # Tablas puramente técnicas que nunca deberían ser destino de un adjunto
 # (nadie le cuelga un archivo a una sesión de login o a un permiso). Como
@@ -53,20 +57,26 @@ class AuditableAdminMixin:
         super().save_model(request, obj, form, change)
 
 
-@admin.register(DocumentType)
-class DocumentTypeAdmin(admin.ModelAdmin):
-    form = DocumentTypeAdminForm
+class NamedCatalogAdmin(admin.ModelAdmin):
+    """
+    Base para el admin de cualquier catálogo que herede
+    apps.core.models.NamedCatalog. Cada catálogo concreto solo necesita
+    definir su propio Form (Meta.model es obligatorio por modelo en Django,
+    no se puede compartir) y registrar la clase — el resto ya viene aquí:
+    Nombre primero (es lo que alguien piensa al crear un valor nuevo),
+    Código autogenerado en vivo vía prepopulated_fields + widget readonly
+    en el Form (bloquea la edición manual, pero sí manda el valor al guardar).
+    """
     list_display = ["name", "code", "is_active"]
     list_filter = ["is_active"]
     search_fields = ["name", "code"]
-    # Nombre primero: es lo que alguien realmente piensa al crear un tipo
-    # nuevo ("Acta de nacimiento"); el código se genera solo a partir de eso.
     fields = ["name", "code", "is_active"]
-    # JS nativo del admin de Django: mientras escribes en "Nombre", va
-    # actualizando "Código" en vivo con la versión slugificada. Combinado con
-    # el widget readonly de arriba, queda como una vista previa, no como un
-    # campo que se pueda tocar.
     prepopulated_fields = {"code": ("name",)}
+
+
+@admin.register(DocumentType)
+class DocumentTypeAdmin(NamedCatalogAdmin):
+    form = catalog_form(DocumentType)
 
 
 @admin.register(Attachment)

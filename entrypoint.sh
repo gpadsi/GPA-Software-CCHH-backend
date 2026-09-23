@@ -50,6 +50,24 @@ if [ "${APP_ROLE:-web}" = "web" ]; then
     echo "==> Sembrando catálogo de tipos de documento..."
     python manage.py seed_document_types 2>/dev/null || true
 
+    echo "==> Sembrando organización (Tenant)..."
+    python manage.py seed_tenant 2>/dev/null || true
+
+    echo "==> Sembrando niveles organizacionales..."
+    python manage.py seed_organizational_levels 2>/dev/null || true
+
+    echo "==> Sembrando empresas y unidades de negocio de Grupo GPA..."
+    python manage.py seed_gpa_companies 2>/dev/null || true
+
+    echo "==> Sembrando catálogos de Persona..."
+    python manage.py seed_persons_catalogs 2>/dev/null || true
+
+    echo "==> Sembrando catálogos de Posición..."
+    python manage.py seed_position_catalogs 2>/dev/null || true
+
+    echo "==> Sembrando catálogos de Origen/Causa de baja..."
+    python manage.py seed_baja_catalogs 2>/dev/null || true
+
     echo "==> Verificando superusuario inicial..."
     python manage.py shell -c "
 from django.contrib.auth import get_user_model

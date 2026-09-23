@@ -10,6 +10,43 @@ from django.db import models
 from django.utils.text import slugify
 
 
+class NamedCatalog(models.Model):
+    """
+    Base abstracta para catálogos simples: código + nombre + activo. El
+    código se autogenera desde el nombre en save() si no se da explícito —
+    mismo patrón que apps.core.DocumentType, ya probado (admin con
+    prepopulated_fields + widget readonly). Un catálogo con campos extra
+    (ej. una FK a otro catálogo, como CausaBaja -> OrigenBaja) hereda de aquí
+    y agrega lo que necesite, sin repetir code/name/is_active/save().
+    """
+    code = models.SlugField(
+        max_length=50,
+        unique=True,
+        blank=True,
+        verbose_name="Código",
+        help_text="Identificador interno. Se genera solo a partir del Nombre.",
+    )
+    name = models.CharField(max_length=150, verbose_name="Nombre")
+    is_active = models.BooleanField(default=True, verbose_name="Activo")
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            base_code = slugify(self.name)
+            code, counter = base_code, 1
+            while type(self).objects.filter(code=code).exclude(pk=self.pk).exists():
+                code = f"{base_code}-{counter}"
+                counter += 1
+            self.code = code
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        abstract = True
+        ordering = ["name"]
+
+
 class BaseAuditModel(models.Model):
     """
     Modelo base abstracto. Toda entidad OPERATIVA del sistema hereda de aquí
