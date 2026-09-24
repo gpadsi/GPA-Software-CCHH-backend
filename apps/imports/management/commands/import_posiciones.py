@@ -43,6 +43,15 @@ HEADER_ROW_INDEX = 3  # fila 4 del Excel (0-indexed)
 REQUIRED_COLUMNS = ["Nomina", "Empresa", "Estatus"]
 DEEP_LEVEL_COLUMNS = [("Gerencia", "gerencia"), ("Coordinación", "coordinacion"), ("Centro de Trabajo", "centro_trabajo")]
 
+# Typos confirmados en Nómina dentro de la propia sábana (letras
+# transpuestas: "AVD" en vez de "ADV") — confirmado 2026-09-24 al revisar
+# por qué esas 2 Nóminas no aparecían en Colaboradores. Solo 2 casos
+# puntuales, no un patrón general.
+NOMINA_TYPOS = {
+    "AVD1033": "ADV1033",
+    "AVD1096": "ADV1096",
+}
+
 
 class Command(BaseCommand):
     help = (
@@ -182,6 +191,7 @@ class Command(BaseCommand):
             empleado = None
             if nomina:
                 work_number = str(nomina).strip().upper()
+                work_number = NOMINA_TYPOS.get(work_number, work_number)
                 empleado = Empleado.objects.filter(work_number=work_number).select_related("persona").first()
                 if empleado is None:
                     stats["empleado_no_encontrado"] += 1
