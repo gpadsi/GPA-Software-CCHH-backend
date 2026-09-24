@@ -16,6 +16,7 @@
 #   no existen — son datos reales de GPA (no inventados), y ya se estableció
 #   este mismo criterio para el ejemplo manual que se cargó antes.
 import datetime
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.employment.models import CausaBaja, Contrato, Empleado, OrigenBaja
 from apps.imports.models import ImportBatch, PosicionRawRow, RawValueAlias
 from apps.imports.normalize import normalize_text, resolve_against_catalog
-from apps.locations.models import Area
+from apps.locations.models import Area, Nave, Ubicacion
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.persons.models import Genero
 from apps.positions.models import (
@@ -107,6 +108,23 @@ class Command(BaseCommand):
         if options["limit"]:
             data_rows = data_rows[: options["limit"]]
 
+        # Nombres organizacionales que NO cuentan como Área real si el texto
+        # de esa columna los repite (mismo eco confirmado 2026-09-24 que ya
+        # aplica seed_normalized_puesto_nave_ubicacion). Se arma con una
+        # pasada completa sobre las filas de ESTA corrida (Unidad de Negocio
+        # ya existe en el catálogo; Gerencia/Coordinación/Centro de Trabajo
+        # todavía no cuando arranca la corrida, se crean sobre la marcha) —
+        # así no importa en qué orden del archivo aparezca cada nombre.
+        nombres_organizacion = {
+            normalize_text(n) for n in
+            OrganizationNode.objects.exclude(level__numero=1).values_list("name", flat=True)
+        }
+        for row in data_rows:
+            for column_name, _key in DEEP_LEVEL_COLUMNS:
+                value = self._clean(self._get(row, col, column_name))
+                if value:
+                    nombres_organizacion.add(normalize_text(value))
+
         for i, row in enumerate(data_rows, start=HEADER_ROW_INDEX + 2):
             if all(v is None for v in row):
                 continue
@@ -128,7 +146,7 @@ class Command(BaseCommand):
                 continue
 
             puesto, _ = self._resolve_optional(row, col, "Puesto", Puesto.objects.all(), "puesto", unresolved)
-            area, _ = self._resolve_optional(row, col, "Área", Area.objects.all(), "area", unresolved)
+            area = self._resolve_area(row, col, unresolved, nombres_organizacion)
             alcance, _ = self._resolve_optional(row, col, "Alcance de Posición", AlcanceDePosicion.objects.all(), "alcance", unresolved)
             tipo_req, _ = self._resolve_optional(row, col, "Tipo de Requisición", TipoRequisicion.objects.all(), "tipo_requisicion", unresolved)
             tipo_pos, _ = self._resolve_optional(row, col, "Tipo de Posición", TipoPosicion.objects.all(), "tipo_posicion", unresolved)
@@ -272,6 +290,49 @@ class Command(BaseCommand):
         if obj is None:
             unresolved[domain].add(normalized)
         return obj, normalized
+
+    def _resolve_area(self, row, col, unresolved, nombres_organizacion):
+        """
+        Resuelve Área. Si ESTA fila trae también Ubicación y Nave reales,
+        se prefiere/crea un Área específica de esa Nave — confirmado
+        2026-09-24: una misma Área (ej. "Pintura") existe en varias naves a
+        la vez en los datos reales, así que no se puede asumir una sola Nave
+        por Área en general; solo se liga cuando la propia fila lo confirma.
+        Si no hay Nave en la fila, cae al Área genérica (sin nave) ya
+        sembrada por seed_normalized_puesto_nave_ubicacion.
+
+        En ambos casos se excluyen los "eco" de Unidad de Negocio/Gerencia/
+        Coordinación/Centro de Trabajo — el mismo filtro que ya aplica esa
+        siembra, para no crear un Área falsa solo porque la fila sí trae Nave.
+        """
+        area_raw = self._get(row, col, "Área")
+        if not area_raw:
+            return None
+        area_norm = normalize_text(area_raw, domain="area")
+        if area_norm in nombres_organizacion:
+            return None
+
+        ubicacion_raw = self._get(row, col, "Ubicación")
+        nave_raw = self._get(row, col, "Nave")
+        if ubicacion_raw and nave_raw:
+            ubicacion, _ = resolve_against_catalog(ubicacion_raw, Ubicacion.objects.all(), "ubicacion", RawValueAlias)
+            if ubicacion is not None:
+                nave, _ = resolve_against_catalog(
+                    nave_raw, Nave.objects.filter(ubicacion=ubicacion), "nave", RawValueAlias,
+                )
+                if nave is not None and area_norm:
+                    code = re.sub(r"\s+", "-", area_norm)[:30]
+                    area, _ = Area.objects.get_or_create(
+                        nave=nave, code=code, defaults={"name": area_raw.strip()},
+                    )
+                    return area
+
+        area, normalized = resolve_against_catalog(
+            area_raw, Area.objects.filter(nave__isnull=True), "area", RawValueAlias,
+        )
+        if area is None:
+            unresolved["area"].add(normalized)
+        return area
 
     def _backfill_persona(self, persona, row, col, unresolved):
         changed = False
