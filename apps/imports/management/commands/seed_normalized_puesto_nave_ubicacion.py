@@ -1,12 +1,13 @@
 # apps/imports/management/commands/seed_normalized_puesto_nave_ubicacion.py
-# Siembra los catálogos Puesto, Ubicacion y Nave a partir de los valores
-# reales de la sábana, agrupando variantes (typos, abreviaciones,
+# Siembra los catálogos Puesto, Ubicacion, Nave y Area a partir de los
+# valores reales de la sábana, agrupando variantes (typos, abreviaciones,
 # mayúsculas/acentos) confirmadas con el usuario 2026-09-24. No toca
 # Posicion aquí — eso se resuelve re-corriendo import_posiciones después,
 # ahora que estos catálogos y sus alias ya existen.
 #
-# Área queda deliberadamente fuera: sigue mezclada con Unidad de Negocio
-# (ver hallazgos previos), es un problema aparte todavía sin resolver.
+# Area.nave queda temporal (ver apps/core/checks.py): en los datos reales
+# Área casi siempre viene capturada pero Nave casi nunca, así que las Areas
+# que se siembran aquí nacen sin Nave asignada — se completa después.
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -17,7 +18,8 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.imports.models import RawValueAlias
 from apps.imports.normalize import normalize_text
-from apps.locations.models import Nave, Ubicacion
+from apps.locations.models import Area, Nave, Ubicacion
+from apps.organizations.models import OrganizationNode
 from apps.positions.models import Puesto
 
 HEADER_ROW_INDEX = 3
@@ -71,6 +73,7 @@ class Command(BaseCommand):
 
         self._seed_puesto(data_rows, col)
         self._seed_ubicacion_y_nave(data_rows, col)
+        self._seed_area(data_rows, col)
 
     # ---------------------------------------------------------------- Puesto
     def _seed_puesto(self, data_rows, col):
@@ -201,3 +204,56 @@ class Command(BaseCommand):
                 f"(probablemente Ubicación mal capturada en la columna Nave): "
                 f"{[(u, v) for u, v in omitidos]}"
             ))
+
+    # -------------------------------------------------------------- Área
+    def _seed_area(self, data_rows, col):
+        """
+        Área se siembra SIN Nave (nave=None, temporal) — solo para los
+        valores que NO son eco de una Unidad de Negocio o de un nombre ya
+        usado en Gerencia/Coordinación/Centro de Trabajo. Esos ecos (confirmados
+        2026-09-24: 203 + 134 de 834 filas) no se crean como Área — repetir
+        "MASS PRODUCTION" como si fuera un Área física sería inventar algo
+        que los propios datos ya contradicen.
+        """
+        nombres_organizacion = {
+            normalize_text(n) for n in OrganizationNode.objects.exclude(level__numero=1).values_list("name", flat=True)
+        }
+
+        area_counter = Counter()
+        for row in data_rows:
+            v = row[col["Área"]]
+            if v is not None and str(v).strip():
+                area_counter[str(v).strip()] += 1
+
+        groups = defaultdict(list)
+        eco_count = 0
+        for raw, cnt in area_counter.items():
+            canon_val = normalize_text(raw, domain="area")
+            if canon_val in nombres_organizacion:
+                eco_count += cnt
+                continue
+            groups[canon_val].append((raw, cnt))
+
+        ct_area = ContentType.objects.get_for_model(Area)
+        created_area = created_area_alias = 0
+        for canon_val, variants in groups.items():
+            representative = max(variants, key=lambda x: x[1])[0]
+            code = re.sub(r"\s+", "-", canon_val).upper()[:30]
+            display_name = to_title_es(canon_val) if canon_val.isupper() else representative
+            area, was_created = Area.objects.get_or_create(nave=None, code=code, defaults={"name": display_name})
+            created_area += int(was_created)
+            for raw, _cnt in variants:
+                raw_norm = normalize_text(raw, domain="area")
+                if raw_norm == canon_val:
+                    continue
+                _, alias_created = RawValueAlias.objects.get_or_create(
+                    domain="area", raw_value=raw_norm,
+                    defaults={"raw_value_original": raw, "content_type": ct_area, "object_id": str(area.pk)},
+                )
+                created_area_alias += int(alias_created)
+
+        self.stdout.write(self.style.SUCCESS(
+            f"Área: {sum(area_counter.values())} filas -> {eco_count} son eco de Unidad de Negocio/organigrama "
+            f"(no se crean), {len(groups)} áreas reales sembradas ({created_area} nuevas, {created_area_alias} alias), "
+            f"todas sin Nave asignada todavía."
+        ))

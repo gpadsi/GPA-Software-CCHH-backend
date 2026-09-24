@@ -20,6 +20,7 @@ _TEMPORARILY_OPTIONAL_FIELDS = [
     ("positions", "Posicion", "area"),
     ("schedules", "AsignacionUbicacion", "catorcena"),
     ("schedules", "AsignacionHorario", "catorcena"),
+    ("locations", "Area", "nave"),
 ]
 
 

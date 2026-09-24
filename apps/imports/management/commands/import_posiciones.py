@@ -26,6 +26,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.employment.models import CausaBaja, Contrato, Empleado, OrigenBaja
 from apps.imports.models import ImportBatch, PosicionRawRow, RawValueAlias
 from apps.imports.normalize import normalize_text, resolve_against_catalog
+from apps.locations.models import Area
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.persons.models import Genero
 from apps.positions.models import (
@@ -127,6 +128,7 @@ class Command(BaseCommand):
                 continue
 
             puesto, _ = self._resolve_optional(row, col, "Puesto", Puesto.objects.all(), "puesto", unresolved)
+            area, _ = self._resolve_optional(row, col, "Área", Area.objects.all(), "area", unresolved)
             alcance, _ = self._resolve_optional(row, col, "Alcance de Posición", AlcanceDePosicion.objects.all(), "alcance", unresolved)
             tipo_req, _ = self._resolve_optional(row, col, "Tipo de Requisición", TipoRequisicion.objects.all(), "tipo_requisicion", unresolved)
             tipo_pos, _ = self._resolve_optional(row, col, "Tipo de Posición", TipoPosicion.objects.all(), "tipo_posicion", unresolved)
@@ -135,6 +137,7 @@ class Command(BaseCommand):
             posicion = Posicion(
                 organization_node=org_node,
                 puesto=puesto,
+                area=area,
                 alcance=alcance,
                 tipo_requisicion=tipo_req,
                 tipo_posicion=tipo_pos,

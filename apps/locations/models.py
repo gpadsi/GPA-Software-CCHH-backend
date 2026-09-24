@@ -53,8 +53,13 @@ class Nave(BaseAuditModel):
 
 
 class Area(BaseAuditModel):
+    # TEMPORAL (2026-09-24): null=True/blank=True — ver apps/core/checks.py.
+    # En los datos reales, Área casi siempre viene capturada (834 de 844
+    # filas) pero Nave casi nunca (85 de 844) — exigir Nave dejaría sin
+    # poder registrar el Área real de la mayoría de las posiciones mientras
+    # no se sepa en qué nave está físicamente cada una.
     nave = models.ForeignKey(
-        Nave, on_delete=models.PROTECT, related_name="areas",
+        Nave, on_delete=models.PROTECT, null=True, blank=True, related_name="areas",
         verbose_name="Nave",
     )
     code = models.CharField(max_length=30, verbose_name="Código")
