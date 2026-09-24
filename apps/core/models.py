@@ -31,10 +31,15 @@ class NamedCatalog(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.code:
-            base_code = slugify(self.name)
+            max_length = self._meta.get_field("code").max_length
+            # Trunca ANTES de generar el slug completo: un nombre largo (ej.
+            # un título de puesto largo) no debe tronar al guardar solo
+            # porque el código autogenerado se pasa del límite de la columna.
+            base_code = slugify(self.name)[:max_length]
             code, counter = base_code, 1
             while type(self).objects.filter(code=code).exclude(pk=self.pk).exists():
-                code = f"{base_code}-{counter}"
+                suffix = f"-{counter}"
+                code = base_code[: max_length - len(suffix)] + suffix
                 counter += 1
             self.code = code
         super().save(*args, **kwargs)
