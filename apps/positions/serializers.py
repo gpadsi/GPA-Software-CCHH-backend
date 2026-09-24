@@ -80,7 +80,7 @@ class PosicionSerializer(FullCleanModelSerializer):
     class Meta:
         model = Posicion
         fields = [
-            "id", "organization_node", "area", "puesto", "reports_to",
+            "id", "organization_node", "area", "puesto", "reports_to", "supervision_texto",
             "alcance", "tipo_posicion", "tipo_requisicion", "estatus", "genero_requerido",
             "fecha_registro_vacante", "fecha_autorizacion_vacante",
             "headhunter", "solicitante_vacante",

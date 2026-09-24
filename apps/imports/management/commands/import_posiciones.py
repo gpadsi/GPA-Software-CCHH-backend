@@ -167,6 +167,7 @@ class Command(BaseCommand):
                 solicitante_vacante=self._clean(self._get(row, col, "Solicitante de Vacante")) or "",
                 proyecto_eventual=self._clean(self._get(row, col, "Proyecto Eventual")) or "",
                 fecha_esperada_termino=self._to_date(self._get(row, col, "Fecha Esperada de Termino")),
+                supervision_texto=(self._clean(self._get(row, col, "Supervisión")) or "")[:200],
             )
             try:
                 posicion.full_clean()

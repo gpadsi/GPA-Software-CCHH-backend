@@ -45,7 +45,7 @@ class PosicionAdmin(AuditableAdminMixin, admin.ModelAdmin):
     autocomplete_fields = ["organization_node", "area", "puesto", "reports_to"]
     fieldsets = (
         ("Ubicación en la estructura", {
-            "fields": ("organization_node", "area", "puesto", "reports_to"),
+            "fields": ("organization_node", "area", "puesto", "reports_to", "supervision_texto"),
         }),
         ("Clasificación", {
             "fields": ("alcance", "tipo_posicion", "tipo_requisicion", "estatus", "genero_requerido"),

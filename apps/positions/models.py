@@ -90,6 +90,15 @@ class Posicion(BaseAuditModel):
         related_name="reportes", verbose_name="Reporta a",
         help_text="La posición de la que depende — de aquí se resuelve el jefe inmediato.",
     )
+    # NO es reports_to ni una relación resuelta a propósito: la columna
+    # "Supervisión" de la sábana mezcla nombres de persona (ej. "ALAN
+    # ARTEAGA") con nombres de unidad (ej. "Supervisión de Producción 1"),
+    # y GPA todavía no ha confirmado cuál es cuál — se captura tal cual
+    # llega, sin inventar a qué corresponde, hasta que se aclare.
+    supervision_texto = models.CharField(
+        max_length=200, blank=True, verbose_name="Supervisión (texto original)",
+        help_text="Tal como viene en la sábana — puede ser un nombre de persona o de unidad, todavía sin confirmar.",
+    )
 
     alcance = models.ForeignKey(
         AlcanceDePosicion, on_delete=models.SET_NULL, null=True, blank=True,
