@@ -71,12 +71,19 @@ class Posicion(BaseAuditModel):
         verbose_name="Unidad organizacional",
         help_text="A qué Unidad de Negocio/Empresa pertenece esta posición.",
     )
+    # TEMPORAL (2026-09-23): null=True/blank=True en area y puesto — ver
+    # apps/core/checks.py. Se queda on_delete=PROTECT (no cambia): eso solo
+    # evita borrar un Area/Puesto todavía en uso, es independiente de que el
+    # campo admita quedar vacío mientras no se ha asignado.
     area = models.ForeignKey(
         Area, on_delete=models.PROTECT, related_name="posiciones",
+        null=True, blank=True,
         verbose_name="Área",
         help_text="Dónde está sentada físicamente (Ubicación → Nave → Área).",
     )
-    puesto = models.ForeignKey(Puesto, on_delete=models.PROTECT, verbose_name="Puesto")
+    puesto = models.ForeignKey(
+        Puesto, on_delete=models.PROTECT, null=True, blank=True, verbose_name="Puesto",
+    )
     reports_to = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.PROTECT,
         related_name="reportes", verbose_name="Reporta a",

@@ -51,7 +51,9 @@ class Empleado(BaseAuditModel):
         related_name="empleado", verbose_name="Usuario del sistema",
         help_text="Opcional — no todo empleado necesita una cuenta de acceso.",
     )
-    work_number = models.CharField(max_length=30, unique=True, verbose_name="Número de nómina")
+    # TEMPORAL (2026-09-23): null=True/blank=True — ver apps/core/checks.py,
+    # mismo motivo que Persona.curp/nss/rfc.
+    work_number = models.CharField(max_length=30, unique=True, null=True, blank=True, verbose_name="Número de nómina")
 
     def __str__(self):
         return f"{self.work_number} — {self.persona}"

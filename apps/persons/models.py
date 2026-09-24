@@ -42,11 +42,15 @@ class Persona(BaseAuditModel):
         help_text="Puede quedar vacío — no todas las personas lo tienen.",
     )
 
-    curp = models.CharField(max_length=18, unique=True, verbose_name="CURP")
-    nss = models.CharField(max_length=11, unique=True, verbose_name="NSS")
-    rfc = models.CharField(max_length=13, unique=True, verbose_name="RFC")
+    # TEMPORAL (2026-09-23): null=True/blank=True mientras GPA completa estos
+    # datos para todo el personal — ver apps/core/checks.py, que avisa en cada
+    # `manage.py check` mientras sigan así. null=True (no solo blank=True) es
+    # a propósito: con unique=True, blank="" colisionaría entre sí; NULL no.
+    curp = models.CharField(max_length=18, unique=True, null=True, blank=True, verbose_name="CURP")
+    nss = models.CharField(max_length=11, unique=True, null=True, blank=True, verbose_name="NSS")
+    rfc = models.CharField(max_length=13, unique=True, null=True, blank=True, verbose_name="RFC")
 
-    birth_date = models.DateField(verbose_name="Fecha de nacimiento")
+    birth_date = models.DateField(null=True, blank=True, verbose_name="Fecha de nacimiento")
     # Simplificación deliberada: texto libre, no catálogo de estados/países.
     # No se construyó un catálogo geográfico (Country/State) en esta fase
     # porque no estaba en el plan confirmado — si hace falta filtrar/validar

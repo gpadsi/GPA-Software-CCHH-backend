@@ -39,6 +39,7 @@ LOCAL_APPS = [
     "apps.persons",
     "apps.positions",
     "apps.employment",
+    "apps.imports",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -234,7 +235,7 @@ JAZZMIN_SETTINGS = {
     # agreguen apps de dominio (Persona, Puesto, ...).
     "order_with_respect_to": [
         "users", "persons", "employment", "positions", "locations",
-        "organizations", "core", "auth",
+        "organizations", "core", "imports", "auth",
     ],
     "icons": {
         "auth": "fas fa-users-cog",
@@ -269,6 +270,11 @@ JAZZMIN_SETTINGS = {
         "employment.historialsalarial": "fas fa-money-check-alt",
         "employment.origenbaja": "fas fa-sign-out-alt",
         "employment.causabaja": "fas fa-list-ul",
+        "imports.importbatch": "fas fa-file-import",
+        "imports.posicionrawrow": "fas fa-table",
+        "imports.colaboradorrawrow": "fas fa-table",
+        "imports.horariorawrow": "fas fa-table",
+        "imports.rawvaluealias": "fas fa-random",
     },
     "default_icon_parents": "fas fa-chevron-circle-right",
     "default_icon_children": "fas fa-circle",
@@ -276,4 +282,7 @@ JAZZMIN_SETTINGS = {
     "use_google_fonts_cdn": True,
     "show_ui_builder": False,
     "changeform_format": "horizontal_tabs",
+    # Recuerda la posición de scroll del menú lateral entre una página y otra
+    # (Django admin recarga la página completa en cada navegación).
+    "custom_js": "core/js/sidebar-scroll.js",
 }
