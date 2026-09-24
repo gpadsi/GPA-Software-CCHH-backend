@@ -39,6 +39,7 @@ LOCAL_APPS = [
     "apps.persons",
     "apps.positions",
     "apps.employment",
+    "apps.schedules",
     "apps.imports",
 ]
 
@@ -234,7 +235,7 @@ JAZZMIN_SETTINGS = {
     # Orden de las secciones en el sidebar — se va ampliando conforme se
     # agreguen apps de dominio (Persona, Puesto, ...).
     "order_with_respect_to": [
-        "users", "persons", "employment", "positions", "locations",
+        "users", "persons", "employment", "schedules", "positions", "locations",
         "organizations", "core", "imports", "auth",
     ],
     "icons": {
@@ -265,6 +266,7 @@ JAZZMIN_SETTINGS = {
         "positions.tipoposicion": "fas fa-clipboard-list",
         "positions.tiporequisicion": "fas fa-file-signature",
         "positions.estatusposicion": "fas fa-toggle-on",
+        "positions.historialreportaa": "fas fa-history",
         "employment.empleado": "fas fa-user-tie",
         "employment.contrato": "fas fa-file-contract",
         "employment.historialsalarial": "fas fa-money-check-alt",
@@ -275,6 +277,10 @@ JAZZMIN_SETTINGS = {
         "imports.colaboradorrawrow": "fas fa-table",
         "imports.horariorawrow": "fas fa-table",
         "imports.rawvaluealias": "fas fa-random",
+        "schedules.catorcena": "fas fa-calendar-week",
+        "schedules.tipohorario": "fas fa-clock",
+        "schedules.asignacionubicacion": "fas fa-map-marked-alt",
+        "schedules.asignacionhorario": "fas fa-business-time",
     },
     "default_icon_parents": "fas fa-chevron-circle-right",
     "default_icon_children": "fas fa-circle",

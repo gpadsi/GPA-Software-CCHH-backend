@@ -25,7 +25,8 @@ class ImportBatchAdmin(AuditableAdminMixin, admin.ModelAdmin):
     list_display = ["source", "original_filename", "created_at", "created_by"]
     list_filter = ["source"]
     search_fields = ["original_filename", "notes"]
-    readonly_fields = ["created_by", "created_at"]
+    readonly_fields = ["created_at"]
+    fields = ["source", "original_filename", "notes", "created_at"]
 
 
 class _RawRowAdmin(admin.ModelAdmin):
@@ -33,6 +34,7 @@ class _RawRowAdmin(admin.ModelAdmin):
     list_filter = ["import_batch"]
     search_fields = ["row_number"]
     readonly_fields = ["import_batch", "row_number", "data"]
+    fields = ["import_batch", "row_number", "data"]
 
     def has_add_permission(self, request):
         # Estas filas las crea el comando de importación, no una persona a
@@ -60,7 +62,7 @@ class RawValueAliasAdmin(AuditableAdminMixin, admin.ModelAdmin):
     list_display = ["domain", "raw_value_original", "raw_value", "content_type", "object_id"]
     list_filter = ["domain", "content_type"]
     search_fields = ["raw_value", "raw_value_original", "object_id"]
-    autocomplete_fields = []
+    fields = ["domain", "raw_value", "raw_value_original", "content_type", "object_id"]
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == "content_type":

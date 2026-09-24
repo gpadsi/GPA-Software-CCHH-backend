@@ -4,6 +4,7 @@ from apps.core.admin import AuditableAdminMixin, NamedCatalogAdmin, catalog_form
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
+    HistorialReportaA,
     Posicion,
     Puesto,
     TipoPosicion,
@@ -57,3 +58,17 @@ class PosicionAdmin(AuditableAdminMixin, admin.ModelAdmin):
             ),
         }),
     )
+
+
+@admin.register(HistorialReportaA)
+class HistorialReportaAAdmin(admin.ModelAdmin):
+    list_display = ["posicion", "reports_to", "fecha_inicio", "fecha_fin"]
+    list_filter = ["fecha_fin"]
+    search_fields = ["posicion__puesto__name", "reports_to__puesto__name"]
+    autocomplete_fields = ["posicion", "reports_to"]
+    fields = ["posicion", "reports_to", "fecha_inicio", "fecha_fin"]
+    readonly_fields = ["posicion", "reports_to", "fecha_inicio", "fecha_fin"]
+
+    def has_add_permission(self, request):
+        # Se llena solo desde Posicion.save() — nadie lo captura a mano.
+        return False

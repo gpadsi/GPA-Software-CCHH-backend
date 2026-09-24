@@ -18,6 +18,8 @@ _TEMPORARILY_OPTIONAL_FIELDS = [
     ("employment", "Empleado", "work_number"),
     ("positions", "Posicion", "puesto"),
     ("positions", "Posicion", "area"),
+    ("schedules", "AsignacionUbicacion", "catorcena"),
+    ("schedules", "AsignacionHorario", "catorcena"),
 ]
 
 

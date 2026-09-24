@@ -1,5 +1,6 @@
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 from apps.core.models import BaseAuditModel, NamedCatalog
 from apps.locations.models import Area
@@ -133,9 +134,67 @@ class Posicion(BaseAuditModel):
             visited.add(ancestor.pk)
             ancestor = ancestor.reports_to
 
+    def save(self, *args, **kwargs):
+        # Cada vez que cambia reports_to (incluida la primera vez que se
+        # guarda), se registra en HistorialReportaA — así nunca se pierde
+        # quién era el jefe antes de un reacomodo, aunque la Posición misma
+        # no cambie. reports_to se queda como está (el campo que se edita
+        # normal); esto solo lo audita solo, sin que nadie tenga que
+        # acordarse de hacerlo a mano.
+        is_new = self._state.adding
+        previous_reports_to_id = None
+        if not is_new:
+            previous_reports_to_id = (
+                Posicion.objects.filter(pk=self.pk).values_list("reports_to_id", flat=True).first()
+            )
+        reports_to_changed = is_new or previous_reports_to_id != self.reports_to_id
+
+        super().save(*args, **kwargs)
+
+        if reports_to_changed:
+            hoy = timezone.now().date()
+            HistorialReportaA.objects.filter(posicion=self, fecha_fin__isnull=True).update(fecha_fin=hoy)
+            HistorialReportaA.objects.create(posicion=self, reports_to=self.reports_to, fecha_inicio=hoy)
+
     def __str__(self):
         return f"{self.puesto} — {self.area}"
 
     class Meta:
         verbose_name = "Posición"
         verbose_name_plural = "Posiciones"
+
+
+class HistorialReportaA(BaseAuditModel):
+    """
+    Historial de a qué Posición reporta cada Posición, a lo largo del tiempo.
+    Existe porque Posicion.reports_to es un campo "vigente" (se sobreescribe),
+    y si cambia la línea de reporte sin que la Posición misma cambie, se
+    perdía quién era el jefe antes. Se llena solo desde Posicion.save() — no
+    se captura a mano (ver PosicionAdmin/HistorialReportaAAdmin).
+    """
+    posicion = models.ForeignKey(
+        Posicion, on_delete=models.CASCADE, related_name="historial_reporta_a",
+        verbose_name="Posición",
+    )
+    reports_to = models.ForeignKey(
+        Posicion, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="historial_subordinados", verbose_name="Reportaba a",
+        help_text="Vacío significa que en este periodo no reportaba a nadie (nivel más alto).",
+    )
+    fecha_inicio = models.DateField(verbose_name="Vigente desde")
+    fecha_fin = models.DateField(null=True, blank=True, verbose_name="Vigente hasta", help_text="Vacío = periodo actual.")
+
+    def __str__(self):
+        hasta = self.fecha_fin or "hoy"
+        return f"{self.posicion} → {self.reports_to} ({self.fecha_inicio} – {hasta})"
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["posicion"], condition=models.Q(fecha_fin__isnull=True),
+                name="unique_historial_reporta_a_vigente_por_posicion",
+            ),
+        ]
+        ordering = ["-fecha_inicio"]
+        verbose_name = "Historial de a quién reporta"
+        verbose_name_plural = "Historial de a quién reporta"
