@@ -59,8 +59,11 @@ class Persona(BaseAuditModel):
         max_length=100, blank=True, verbose_name="Estado de nacimiento",
     )
 
+    # TEMPORAL (2026-09-24): null=True/blank=True — ver apps/core/checks.py.
+    # "Lista Colaboradores" (fuente real para crear Persona) no trae columna
+    # de género en absoluto; llega después con la hoja "Posiciones".
     gender = models.ForeignKey(
-        Genero, on_delete=models.PROTECT, verbose_name="Género",
+        Genero, on_delete=models.PROTECT, null=True, blank=True, verbose_name="Género",
     )
     marital_status = models.ForeignKey(
         EstadoCivil, on_delete=models.SET_NULL, null=True, blank=True,

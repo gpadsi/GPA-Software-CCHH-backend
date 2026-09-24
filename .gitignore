@@ -47,3 +47,7 @@ AGENTS.md
 .cursor/
 .windsurf/
 docs/
+
+# Archivos fuente de importación (traen datos reales de personal — CURP,
+# NSS, RFC, domicilios... nunca deben subirse al repo)
+data/

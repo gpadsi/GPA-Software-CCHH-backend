@@ -14,6 +14,7 @@ _TEMPORARILY_OPTIONAL_FIELDS = [
     ("persons", "Persona", "nss"),
     ("persons", "Persona", "rfc"),
     ("persons", "Persona", "birth_date"),
+    ("persons", "Persona", "gender"),
     ("employment", "Empleado", "work_number"),
     ("positions", "Posicion", "puesto"),
     ("positions", "Posicion", "area"),
