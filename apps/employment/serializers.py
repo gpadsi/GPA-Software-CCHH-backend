@@ -72,3 +72,15 @@ class HistorialSalarialSerializer(FullCleanModelSerializer):
         model = HistorialSalarial
         fields = ["id", "empleado", "monto", "fecha_vigencia"]
         read_only_fields = ["id"]
+
+
+class JefeSerializer(serializers.Serializer):
+    """
+    Salida de Empleado.get_jefe() — todos los campos en None significa que
+    no hay jefe resoluble hoy (sin Contrato activo, nivel más alto de la
+    organización, o posición de jefe vacante), no un error.
+    """
+    posicion_id = serializers.UUIDField(allow_null=True)
+    puesto = serializers.CharField(allow_null=True)
+    empleado_id = serializers.UUIDField(allow_null=True)
+    nombre = serializers.CharField(allow_null=True)

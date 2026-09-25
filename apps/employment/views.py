@@ -1,5 +1,7 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
+from rest_framework.decorators import action
+from rest_framework.response import Response
 
 from apps.core.permissions import (
     IsCapitalHumanoOrAdmin,
@@ -12,6 +14,7 @@ from apps.employment.serializers import (
     ContratoSerializer,
     EmpleadoSerializer,
     HistorialSalarialSerializer,
+    JefeSerializer,
     OrigenBajaSerializer,
 )
 
@@ -70,7 +73,6 @@ def _crud_viewset(target_model, target_serializer_class, permission_classes=None
 
 OrigenBajaViewSet = _catalog_viewset(OrigenBaja, OrigenBajaSerializer)
 CausaBajaViewSet = _catalog_viewset(CausaBaja, CausaBajaSerializer)
-EmpleadoViewSet = _crud_viewset(Empleado, EmpleadoSerializer, owner_lookup="user")
 ContratoViewSet = _crud_viewset(Contrato, ContratoSerializer, owner_lookup="empleado__user")
 # Colaborador no ve su propio salario por ahora (confirmado con el usuario
 # 2026-09-24, puede cambiar más adelante) — gate total, sin excepción de
@@ -78,3 +80,43 @@ ContratoViewSet = _crud_viewset(Contrato, ContratoSerializer, owner_lookup="empl
 HistorialSalarialViewSet = _crud_viewset(
     HistorialSalarial, HistorialSalarialSerializer, permission_classes=[IsCapitalHumanoOrAdmin]
 )
+
+
+@extend_schema_view(
+    list=extend_schema(tags=["employment"]),
+    retrieve=extend_schema(tags=["employment"]),
+    create=extend_schema(tags=["employment"]),
+    update=extend_schema(tags=["employment"]),
+    partial_update=extend_schema(tags=["employment"]),
+    destroy=extend_schema(tags=["employment"]),
+)
+class EmpleadoViewSet(viewsets.ModelViewSet):
+    queryset = Empleado.objects.order_by("pk")
+    serializer_class = EmpleadoSerializer
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+
+    def get_queryset(self):
+        return scope_to_own_unless_management(super().get_queryset(), self.request.user, "user")
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user, updated_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(updated_by=self.request.user)
+
+    @extend_schema(
+        tags=["employment"],
+        summary="Jefe inmediato",
+        description=(
+            "Resuelve el jefe inmediato de este Empleado desde el organigrama "
+            "(Contrato activo -> Posición -> reports_to -> quién la ocupa hoy). "
+            "Un Colaborador solo puede consultar la suya propia — la misma "
+            "restricción de queryset que list/retrieve. Todos los campos en "
+            "null significa que no hay jefe resoluble hoy, no un error."
+        ),
+        responses=JefeSerializer,
+    )
+    @action(detail=True, methods=["get"])
+    def jefe(self, request, pk=None):
+        empleado = self.get_object()
+        return Response(JefeSerializer(empleado.get_jefe()).data)

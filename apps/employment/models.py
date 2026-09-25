@@ -55,6 +55,38 @@ class Empleado(BaseAuditModel):
     # mismo motivo que Persona.curp/nss/rfc.
     work_number = models.CharField(max_length=30, unique=True, null=True, blank=True, verbose_name="Número de nómina")
 
+    def get_contrato_activo(self):
+        """El Contrato vigente (sin fecha_baja) más reciente, si hay alguno."""
+        return self.contratos.filter(fecha_baja__isnull=True).first()
+
+    def get_jefe(self):
+        """
+        Resuelve el jefe inmediato desde el organigrama, siempre al vuelo (no
+        se guarda en ningún lado): Contrato activo -> su Posición -> a qué
+        Posición reporta esa -> quién la ocupa hoy con un Contrato activo.
+        Cualquiera de esos eslabones puede faltar (sin Contrato activo, sin
+        reports_to por ser el nivel más alto, o posición de jefe vacante) —
+        en esos casos se regresan los campos correspondientes en None, nunca
+        se inventa un jefe.
+        """
+        contrato_activo = self.get_contrato_activo()
+        posicion_actual = contrato_activo.posicion if contrato_activo else None
+        posicion_jefe = posicion_actual.reports_to if posicion_actual else None
+
+        contrato_jefe = None
+        if posicion_jefe is not None:
+            contrato_jefe = Contrato.objects.filter(
+                posicion=posicion_jefe, fecha_baja__isnull=True
+            ).first()
+        empleado_jefe = contrato_jefe.empleado if contrato_jefe else None
+
+        return {
+            "posicion_id": posicion_jefe.id if posicion_jefe else None,
+            "puesto": posicion_jefe.puesto.name if (posicion_jefe and posicion_jefe.puesto) else None,
+            "empleado_id": empleado_jefe.id if empleado_jefe else None,
+            "nombre": str(empleado_jefe.persona) if empleado_jefe else None,
+        }
+
     def __str__(self):
         return f"{self.work_number} — {self.persona}"
 
