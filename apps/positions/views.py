@@ -1,6 +1,7 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 
+from apps.core.permissions import IsCapitalHumanoOrAdminOrReadOnly
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
@@ -54,7 +55,7 @@ PuestoViewSet = _catalog_viewset(Puesto, PuestoSerializer)
 class PosicionViewSet(viewsets.ModelViewSet):
     queryset = Posicion.objects.order_by("pk")
     serializer_class = PosicionSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)

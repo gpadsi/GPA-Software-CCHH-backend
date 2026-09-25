@@ -1,6 +1,7 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 
+from apps.core.permissions import IsCapitalHumanoOrAdminOrReadOnly
 from apps.organizations.models import (
     Company,
     OrganizationalLevel,
@@ -46,7 +47,7 @@ class OrganizationalLevelViewSet(viewsets.ReadOnlyModelViewSet):
 class OrganizationNodeViewSet(viewsets.ModelViewSet):
     queryset = OrganizationNode.objects.order_by("pk")
     serializer_class = OrganizationNodeSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)
@@ -66,7 +67,7 @@ class OrganizationNodeViewSet(viewsets.ModelViewSet):
 class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.order_by("pk")
     serializer_class = CompanySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)

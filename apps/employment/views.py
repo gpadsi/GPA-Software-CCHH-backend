@@ -1,6 +1,11 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 
+from apps.core.permissions import (
+    IsCapitalHumanoOrAdmin,
+    IsCapitalHumanoOrAdminOrReadOnly,
+    scope_to_own_unless_management,
+)
 from apps.employment.models import CausaBaja, Contrato, Empleado, HistorialSalarial, OrigenBaja
 from apps.employment.serializers import (
     CausaBajaSerializer,
@@ -31,7 +36,9 @@ def _catalog_viewset(target_model, target_serializer_class):
     return _ViewSet
 
 
-def _crud_viewset(target_model, target_serializer_class):
+def _crud_viewset(target_model, target_serializer_class, permission_classes=None, owner_lookup=None):
+    resolved_permission_classes = permission_classes or [IsCapitalHumanoOrAdminOrReadOnly]
+
     @extend_schema_view(
         list=extend_schema(tags=["employment"]),
         retrieve=extend_schema(tags=["employment"]),
@@ -43,7 +50,13 @@ def _crud_viewset(target_model, target_serializer_class):
     class _ViewSet(viewsets.ModelViewSet):
         queryset = target_model.objects.order_by("pk")
         serializer_class = target_serializer_class
-        permission_classes = [permissions.IsAuthenticated]
+        permission_classes = resolved_permission_classes
+
+        def get_queryset(self):
+            queryset = super().get_queryset()
+            if owner_lookup is None:
+                return queryset
+            return scope_to_own_unless_management(queryset, self.request.user, owner_lookup)
 
         def perform_create(self, serializer):
             serializer.save(created_by=self.request.user, updated_by=self.request.user)
@@ -57,6 +70,11 @@ def _crud_viewset(target_model, target_serializer_class):
 
 OrigenBajaViewSet = _catalog_viewset(OrigenBaja, OrigenBajaSerializer)
 CausaBajaViewSet = _catalog_viewset(CausaBaja, CausaBajaSerializer)
-EmpleadoViewSet = _crud_viewset(Empleado, EmpleadoSerializer)
-ContratoViewSet = _crud_viewset(Contrato, ContratoSerializer)
-HistorialSalarialViewSet = _crud_viewset(HistorialSalarial, HistorialSalarialSerializer)
+EmpleadoViewSet = _crud_viewset(Empleado, EmpleadoSerializer, owner_lookup="user")
+ContratoViewSet = _crud_viewset(Contrato, ContratoSerializer, owner_lookup="empleado__user")
+# Colaborador no ve su propio salario por ahora (confirmado con el usuario
+# 2026-09-24, puede cambiar más adelante) — gate total, sin excepción de
+# "propio registro" como en Empleado/Contrato.
+HistorialSalarialViewSet = _crud_viewset(
+    HistorialSalarial, HistorialSalarialSerializer, permission_classes=[IsCapitalHumanoOrAdmin]
+)

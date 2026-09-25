@@ -1,6 +1,7 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 
+from apps.core.permissions import IsCapitalHumanoOrAdminOrReadOnly, scope_to_own_unless_management
 from apps.persons.models import (
     ContactoUrgencia,
     Escolaridad,
@@ -55,7 +56,10 @@ TipoSangreViewSet = _catalog_viewset(TipoSangre, TipoSangreSerializer)
 class PersonaViewSet(viewsets.ModelViewSet):
     queryset = Persona.objects.order_by("pk")
     serializer_class = PersonaSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+
+    def get_queryset(self):
+        return scope_to_own_unless_management(super().get_queryset(), self.request.user, "empleado__user")
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)
@@ -75,7 +79,12 @@ class PersonaViewSet(viewsets.ModelViewSet):
 class ContactoUrgenciaViewSet(viewsets.ModelViewSet):
     queryset = ContactoUrgencia.objects.order_by("pk")
     serializer_class = ContactoUrgenciaSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+
+    def get_queryset(self):
+        return scope_to_own_unless_management(
+            super().get_queryset(), self.request.user, "persona__empleado__user"
+        )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)
@@ -95,7 +104,12 @@ class ContactoUrgenciaViewSet(viewsets.ModelViewSet):
 class PerfilMedicoViewSet(viewsets.ModelViewSet):
     queryset = PerfilMedico.objects.order_by("pk")
     serializer_class = PerfilMedicoSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+
+    def get_queryset(self):
+        return scope_to_own_unless_management(
+            super().get_queryset(), self.request.user, "persona__empleado__user"
+        )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)

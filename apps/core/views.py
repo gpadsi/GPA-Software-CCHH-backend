@@ -5,6 +5,7 @@ from rest_framework import generics, permissions
 from rest_framework.parsers import FormParser, MultiPartParser
 
 from apps.core.models import Attachment
+from apps.core.permissions import IsCapitalHumanoOrAdmin
 from apps.core.serializers import AttachmentSerializer
 
 
@@ -29,7 +30,12 @@ from apps.core.serializers import AttachmentSerializer
 )
 class AttachmentListCreateView(generics.ListCreateAPIView):
     serializer_class = AttachmentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Solo Capital Humano/Admin por ahora: Attachment se engancha a CUALQUIER
+    # modelo vía GenericForeignKey, así que no hay forma barata de resolver
+    # aquí "¿es mío?" para dejarle lectura propia a un Colaborador como en
+    # Persona/Empleado/etc. Revisar cuando haya un caso de uso real de
+    # autoservicio de archivos.
+    permission_classes = [IsCapitalHumanoOrAdmin]
 
     def get_parsers(self):
         if getattr(self, "request", None) and self.request.method == "POST":
@@ -58,7 +64,7 @@ class AttachmentListCreateView(generics.ListCreateAPIView):
     description="Elimina el registro `Attachment` y su archivo asociado.",
 )
 class AttachmentDestroyView(generics.DestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsCapitalHumanoOrAdmin]
     queryset = Attachment.objects.all()
     # DELETE no usa un serializer para el body, pero drf-spectacular necesita
     # uno para poder generar el schema de esta vista sin marcarla como error.

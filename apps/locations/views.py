@@ -1,6 +1,7 @@
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 
+from apps.core.permissions import IsCapitalHumanoOrAdminOrReadOnly
 from apps.locations.models import Area, Nave, Ubicacion
 from apps.locations.serializers import AreaSerializer, NaveSerializer, UbicacionSerializer
 
@@ -22,7 +23,7 @@ def _crud_viewset(target_model, target_serializer_class):
     class _ViewSet(viewsets.ModelViewSet):
         queryset = target_model.objects.order_by("pk")
         serializer_class = target_serializer_class
-        permission_classes = [permissions.IsAuthenticated]
+        permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
 
         def perform_create(self, serializer):
             serializer.save(created_by=self.request.user, updated_by=self.request.user)
