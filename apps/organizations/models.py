@@ -220,8 +220,13 @@ class Company(BaseAuditModel):
         verbose_name="Nodo organizacional",
         help_text="Nodo de nivel Empresa al que corresponde, ej. «GPA Azimatronics».",
     )
+    # TEMPORAL (2026-09-25): null=True/blank=True — ver apps/core/checks.py.
+    # GPA no nos ha compartido razón social/registro patronal de ninguna de
+    # las 12 empresas reales todavía; se dejan vacíos en vez de inventar un
+    # texto, hasta que llegue la sábana corregida con ese dato.
     legal_name = models.CharField(
         max_length=255,
+        null=True, blank=True,
         verbose_name="Razón social",
         help_text="Razón social completa, ej. «Azimatronics, S.A. de C.V.».",
     )
@@ -235,6 +240,7 @@ class Company(BaseAuditModel):
     )
     employer_registration = models.CharField(
         max_length=100,
+        null=True, blank=True,
         verbose_name="Registro patronal",
         help_text="Registro patronal en texto libre, ej. «Y54-12345-10-1».",
     )
@@ -253,7 +259,9 @@ class Company(BaseAuditModel):
             })
 
     def __str__(self):
-        return self.legal_name
+        # legal_name puede estar vacío todavía (ver TEMPORAL arriba) — cae al
+        # nombre del nodo organizacional en vez de mostrar un "None" feo.
+        return self.legal_name or self.organization_node.name
 
     class Meta:
         verbose_name = "Empresa"

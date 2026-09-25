@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from apps.organizations.models import OrganizationalLevel, OrganizationNode
+from apps.organizations.models import Company, OrganizationalLevel, OrganizationNode
 
 # Empresas y Unidades de Negocio reales de Grupo GPA, confirmadas por el
 # usuario (2026-09-21/22) a partir del Excel de colaboradores actuales +
@@ -61,6 +61,7 @@ class Command(BaseCommand):
 
         companies_created = 0
         units_created = 0
+        company_records_created = 0
 
         for company_code, company_name, units in COMPANIES:
             company_node, created = OrganizationNode.objects.get_or_create(
@@ -72,6 +73,13 @@ class Command(BaseCommand):
                 },
             )
             companies_created += int(created)
+
+            # Razón social/RFC/registro patronal AÚN no confirmados por GPA
+            # para ninguna de las 12 (ver apps/core/checks.py) — se crea el
+            # expediente igual, vacío, para que "Empresas" no aparezca en
+            # blanco mientras se espera esa sábana corregida.
+            _, company_record_created = Company.objects.get_or_create(organization_node=company_node)
+            company_records_created += int(company_record_created)
 
             for unit_code, unit_name in units:
                 _, unit_created = OrganizationNode.objects.get_or_create(
@@ -88,5 +96,8 @@ class Command(BaseCommand):
         total_units = sum(len(units) for _, _, units in COMPANIES)
         self.stdout.write(self.style.SUCCESS(
             f"Empresas: {companies_created} creadas, {total_companies - companies_created} ya existían. "
-            f"Unidades de Negocio: {units_created} creadas, {total_units - units_created} ya existían."
+            f"Unidades de Negocio: {units_created} creadas, {total_units - units_created} ya existían. "
+            f"Expedientes Company: {company_records_created} creados, "
+            f"{total_companies - company_records_created} ya existían (razón social/RFC/registro "
+            f"patronal pendientes de GPA)."
         ))

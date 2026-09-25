@@ -21,6 +21,8 @@ _TEMPORARILY_OPTIONAL_FIELDS = [
     ("schedules", "AsignacionUbicacion", "catorcena"),
     ("schedules", "AsignacionHorario", "catorcena"),
     ("locations", "Area", "nave"),
+    ("organizations", "Company", "legal_name"),
+    ("organizations", "Company", "employer_registration"),
 ]
 
 
