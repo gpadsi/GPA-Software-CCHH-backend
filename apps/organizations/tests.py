@@ -19,6 +19,7 @@ from apps.organizations.models import (
     OrganizationNode,
     Tenant,
 )
+from apps.users.models import UserRole
 
 
 # A partir de "unidad_negocio" (nivel 3), el mismo nivel se anida a sí mismo
@@ -560,16 +561,25 @@ class OrganizationAPITests(OrganizationTestDataMixin, APITestCase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
+        call_command("seed_user_roles", stdout=StringIO())
+        capital_humano = UserRole.objects.get(code="capital-humano")
+
         user_model = get_user_model()
+        # Estos dos representan a Capital Humano/Admin (acceso total de
+        # lectura y escritura): las pruebas de este bloque son sobre CRUD y
+        # auditoría, no sobre el alcance por rol — eso se cubre aparte en
+        # OrganizationRolePermissionTests.
         cls.user = user_model.objects.create_user(
             username="organization-api-user",
             email="organization-api@example.com",
             password="strong-test-password",
+            role=capital_humano,
         )
         cls.other_user = user_model.objects.create_user(
             username="organization-api-editor",
             email="organization-editor@example.com",
             password="strong-test-password",
+            role=capital_humano,
         )
 
     def setUp(self):
@@ -844,3 +854,77 @@ class OrganizationAPITests(OrganizationTestDataMixin, APITestCase):
         self.assertIn("organization_node", response.data)
         self.assertIn("nivel Empresa", str(response.data["organization_node"]))
         self.assertFalse(Company.objects.filter(rfc="INV010203AB1").exists())
+
+
+class OrganizationRolePermissionTests(OrganizationTestDataMixin, APITestCase):
+    """
+    OrganizationNode/Company son catálogos estructurales, no datos
+    personales de nadie en particular: cualquier usuario autenticado los
+    lee completos, pero solo Capital Humano/Admin puede escribir en ellos
+    (ver apps.core.permissions.IsCapitalHumanoOrAdminOrReadOnly).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        call_command("seed_user_roles", stdout=StringIO())
+        user_model = get_user_model()
+        cls.colaborador = user_model.objects.create_user(
+            username="organization-role-colaborador",
+            email="organization-role-colaborador@example.com",
+            password="strong-test-password",
+            role=UserRole.objects.get(code="colaborador"),
+        )
+        cls.company_node = cls.create_valid_node(
+            level_code="empresa", code="GPA-ROLE-TEST", name="Empresa para pruebas de rol",
+        )
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(user=self.colaborador)
+
+    def test_colaborador_can_read_organization_nodes(self):
+        response = self.client.get(reverse("organizationnode-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_colaborador_cannot_create_organization_node(self):
+        response = self.client.post(
+            reverse("organizationnode-list"),
+            {
+                "level": self.levels["unidad_organizacional"].pk,
+                "parent": str(self.company_node.pk),
+                "code": "UO-COLABORADOR",
+                "name": "Creada por un Colaborador",
+                "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(OrganizationNode.objects.filter(code="UO-COLABORADOR").exists())
+
+    def test_colaborador_cannot_update_or_delete_organization_node(self):
+        detail_url = reverse("organizationnode-detail", args=[self.company_node.pk])
+
+        patch_response = self.client.patch(detail_url, {"name": "Nombre alterado"}, format="json")
+        self.assertEqual(patch_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        delete_response = self.client.delete(detail_url)
+        self.assertEqual(delete_response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.company_node.refresh_from_db()
+        self.assertEqual(self.company_node.name, "Empresa para pruebas de rol")
+
+    def test_colaborador_cannot_create_company(self):
+        response = self.client.post(
+            reverse("company-list"),
+            {
+                "organization_node": str(self.company_node.pk),
+                "legal_name": "Intento de Colaborador, S.A. de C.V.",
+                "rfc": "COL010203AB1",
+                "employer_registration": "REG-COLABORADOR",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Company.objects.filter(rfc="COL010203AB1").exists())
