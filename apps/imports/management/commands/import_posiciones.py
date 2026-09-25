@@ -25,7 +25,7 @@ from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.employment.models import CausaBaja, Contrato, Empleado, OrigenBaja
-from apps.imports.models import ImportBatch, PosicionRawRow, RawValueAlias
+from apps.imports.models import ColaboradorRawRow, ImportBatch, PosicionRawRow, RawValueAlias
 from apps.imports.normalize import normalize_text, resolve_against_catalog
 from apps.locations.models import Area, Nave, Ubicacion
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
@@ -95,6 +95,17 @@ class Command(BaseCommand):
         un_level = OrganizationalLevel.objects.get(code="unidad_negocio")
         stats = Counter()
         unresolved = defaultdict(set)
+
+        # "Fecha de alta" y "Fecha de reingreso" NO vienen en esta sábana —
+        # viven en "Lista Colaboradores" (columna "Código", mismo valor que
+        # Nomina aquí), ya guardada tal cual llegó en ColaboradorRawRow por
+        # ese import. Se leen de la corrida más reciente en vez de pedir el
+        # archivo de nuevo como argumento — mismo espíritu que el resto del
+        # staging: la fuente de verdad es lo que ya se importó, no releer
+        # Excels sueltos. "Fecha de Baja" NO se toma de aquí a propósito: la
+        # sábana de Posiciones ya trae la suya propia por Nómina y es la que
+        # se usa (confirmado: son la misma fecha, no hace falta cruzarlas).
+        fechas_alta_reingreso = self._cargar_fechas_alta_reingreso()
 
         # Foto fija ANTES de importar: la Unidad de Negocio "de respaldo" de
         # cada Empresa — si solo tiene una confirmada, es esa; si tiene
@@ -210,10 +221,13 @@ class Command(BaseCommand):
                     if causa_baja is None:
                         unresolved["causa_baja"].add(causa_norm)
 
+                fechas_colaborador = fechas_alta_reingreso.get(work_number, {})
                 contrato = Contrato(
                     empleado=empleado,
                     posicion=posicion,
                     fecha_ingreso=fecha_ingreso,
+                    fecha_alta=fechas_colaborador.get("fecha_alta"),
+                    fecha_reingreso=fechas_colaborador.get("fecha_reingreso"),
                     fecha_baja=self._to_date(self._get(row, col, "Fecha de Baja como Colaborador")),
                     origen_baja=origen_baja,
                     causa_baja=causa_baja,
@@ -344,6 +358,45 @@ class Command(BaseCommand):
         if area is None:
             unresolved["area"].add(normalized)
         return area
+
+    @staticmethod
+    def _cargar_fechas_alta_reingreso():
+        """
+        {work_number: {"fecha_alta": date|None, "fecha_reingreso": date|None}}
+        a partir del ColaboradorRawRow más reciente. Regresa {} si todavía no
+        se ha corrido import_colaboradores — el Contrato simplemente se crea
+        sin esos dos datos, igual que antes de este cambio.
+        """
+        ultimo_lote = (
+            ImportBatch.objects.filter(source=ImportBatch.SOURCE_COLABORADORES)
+            .order_by("-created_at")
+            .first()
+        )
+        if ultimo_lote is None:
+            return {}
+
+        fechas = {}
+        for raw in ColaboradorRawRow.objects.filter(import_batch=ultimo_lote):
+            codigo = raw.data.get("Código")
+            if not codigo:
+                continue
+            work_number = str(codigo).strip().upper()
+            fechas[work_number] = {
+                "fecha_alta": Command._parse_iso_date_string(raw.data.get("Fecha de alta")),
+                "fecha_reingreso": Command._parse_iso_date_string(raw.data.get("Fecha de reingreso")),
+            }
+        return fechas
+
+    @staticmethod
+    def _parse_iso_date_string(value):
+        # ColaboradorRawRow guarda fechas como string ISO (datetime.isoformat()
+        # al momento de crear el staging) — no como datetime/date de Python.
+        if not value:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
 
     def _backfill_persona(self, persona, row, col, unresolved):
         changed = False
