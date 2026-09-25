@@ -165,6 +165,10 @@ SPECTACULAR_SETTINGS = {
             "name": "employment",
             "description": "**Empleo** — Relación laboral: Empleado, historial de contratos y bajas, historial salarial.",
         },
+        {
+            "name": "schedules",
+            "description": "**Horarios y catorcenas** — Periodo de nómina, tipos de horario, y su asignación por Empleado a lo largo del tiempo.",
+        },
     ],
     "SORT_OPERATIONS": False,
     "SERVE_INCLUDE_SCHEMA": False,
