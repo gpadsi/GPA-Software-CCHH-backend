@@ -351,6 +351,37 @@ class EmpleadoContratoRoleAPITests(EmploymentTestDataMixin, APITestCase):
         other_response = self.client.get(reverse("empleado-jefe", args=[self.otro_empleado.pk]))
         self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_contrato_vigente_returns_the_active_contract(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.get(
+            reverse("empleado-contrato-vigente", args=[self.colaborador_empleado.pk])
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], str(self.contrato_propio.pk))
+
+    def test_contrato_vigente_is_null_without_an_active_contract(self):
+        empleado_sin_contrato = self.create_empleado(work_number="ADV0004")
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.get(
+            reverse("empleado-contrato-vigente", args=[empleado_sin_contrato.pk])
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data)
+
+    def test_colaborador_can_query_own_contrato_vigente_but_not_someone_elses(self):
+        self.client.force_authenticate(user=self.colaborador_user)
+
+        own_response = self.client.get(
+            reverse("empleado-contrato-vigente", args=[self.colaborador_empleado.pk])
+        )
+        self.assertEqual(own_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(own_response.data["id"], str(self.contrato_propio.pk))
+
+        other_response = self.client.get(
+            reverse("empleado-contrato-vigente", args=[self.otro_empleado.pk])
+        )
+        self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
+
 
 class HistorialSalarialRoleAPITests(EmploymentTestDataMixin, APITestCase):
     @classmethod

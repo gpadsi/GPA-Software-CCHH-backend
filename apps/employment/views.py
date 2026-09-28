@@ -120,3 +120,21 @@ class EmpleadoViewSet(viewsets.ModelViewSet):
     def jefe(self, request, pk=None):
         empleado = self.get_object()
         return Response(JefeSerializer(empleado.get_jefe()).data)
+
+    @extend_schema(
+        tags=["employment"],
+        summary="Contrato vigente",
+        description=(
+            "El Contrato activo (sin fecha_baja) más reciente de este "
+            "Empleado — reutiliza Empleado.get_contrato_activo(). "
+            "Responde `null` (200) si no tiene ninguno, nunca un error."
+        ),
+        responses=ContratoSerializer,
+    )
+    @action(detail=True, methods=["get"], url_path="contrato-vigente")
+    def contrato_vigente(self, request, pk=None):
+        empleado = self.get_object()
+        contrato = empleado.get_contrato_activo()
+        if contrato is None:
+            return Response(None)
+        return Response(ContratoSerializer(contrato).data)

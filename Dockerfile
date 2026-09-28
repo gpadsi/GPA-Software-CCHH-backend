@@ -1,6 +1,5 @@
 # Dockerfile — Capital Humano
 # Imagen base: Python 3.12 sobre Debian Bookworm slim.
-# Sin GDAL/GEOS/PostGIS: este proyecto no tiene dominio geoespacial.
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1

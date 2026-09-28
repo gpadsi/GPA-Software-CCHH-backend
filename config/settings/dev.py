@@ -17,7 +17,7 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0"] + [
 # NUNCA usar en producción — en prod.py se restringe a CORS_ALLOWED_ORIGINS.
 CORS_ALLOW_ALL_ORIGINS = True
 
-# --- BD: PostgreSQL (sin PostGIS — este proyecto no tiene dominio geoespacial) ---
+# --- BD: PostgreSQL ---
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",

@@ -80,6 +80,10 @@ class ContactoUrgenciaViewSet(viewsets.ModelViewSet):
     queryset = ContactoUrgencia.objects.order_by("pk")
     serializer_class = ContactoUrgenciaSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+    # DjangoFilterBackend ya está registrado globalmente (config/settings) —
+    # esto habilita "?persona=<uuid>" para no traer todos los contactos del
+    # sistema solo para mostrar los de una Persona.
+    filterset_fields = ["persona"]
 
     def get_queryset(self):
         return scope_to_own_unless_management(
@@ -105,6 +109,7 @@ class PerfilMedicoViewSet(viewsets.ModelViewSet):
     queryset = PerfilMedico.objects.order_by("pk")
     serializer_class = PerfilMedicoSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+    filterset_fields = ["persona"]
 
     def get_queryset(self):
         return scope_to_own_unless_management(

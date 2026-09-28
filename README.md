@@ -58,9 +58,15 @@ capital-humano/
 │   ├── urls.py
 │   └── celery.py
 ├── apps/
-│   ├── core/               # BaseAuditModel, Attachment genérico, paginación
-│   ├── users/              # Identidad de acceso (User, JWT, /users/me/)
-│   └── organizations/      # Estructura organizacional: niveles, nodos, empresas
+│   ├── core/            # Modelos y utilidades compartidas: auditoría, catálogos base, adjuntos, permisos por rol
+│   ├── users/           # Identidad de acceso: User, roles (Colaborador/Capital Humano/Admin), JWT, /users/me/
+│   ├── organizations/   # Estructura organizacional: niveles, nodos del árbol, empresas
+│   ├── locations/       # Ubicación física: ubicaciones, naves, áreas
+│   ├── persons/         # Datos personales: personas, contacto de urgencia, perfil médico
+│   ├── positions/       # Posiciones/plazas, línea de reporte, catálogo de puestos
+│   ├── employment/      # Relación laboral: empleados, contratos, historial salarial
+│   ├── schedules/       # Catorcenas, tipos de horario, asignaciones de horario/ubicación
+│   └── imports/         # Importación masiva de datos desde Excel/CSV
 ├── nginx/                  # Reverse proxy (solo producción)
 ├── Dockerfile
 ├── entrypoint.sh
@@ -69,3 +75,17 @@ capital-humano/
 ├── docker-compose.prod.yml  # Override producción (+ nginx)
 └── requirements.txt
 ```
+
+Cada app sigue la misma forma: `models.py`, `serializers.py`, `views.py`, `urls.py`, `tests.py`. Las rutas de cada app se montan bajo su propio prefijo en `/api/v1/` (ej. `positions/posiciones/`, `employment/empleados/`) — el esquema completo y navegable vive en `/api/docs/`.
+
+## Pruebas y validaciones
+
+```bash
+docker compose exec web python manage.py test          # suite completa
+docker compose exec web python manage.py check         # revisiones de Django (incluye advertencias de campos temporalmente opcionales, ver abajo)
+docker compose exec web python manage.py makemigrations --check --dry-run   # confirma que no falten migraciones
+```
+
+Estos tres comandos son exactamente los que corre el workflow de CI (`.github/workflows/ci.yml`) en cada push y cada pull request a `main`.
+
+Algunos campos del modelo aceptan `NULL` de forma temporal mientras se completa la captura de datos reales de personal — están documentados y listados en `apps/core/checks.py`, y `manage.py check` los recuerda en cada corrida hasta que se resuelvan.

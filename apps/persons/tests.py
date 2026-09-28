@@ -159,6 +159,15 @@ class PersonaRoleAPITests(PersonsTestDataMixin, APITestCase):
         response = self.client.get(reverse("contactourgencia-detail", args=[self.contacto_ajeno.pk]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_gestor_can_filter_contactos_urgencia_by_persona(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.get(
+            reverse("contactourgencia-list"),
+            {"persona": str(self.colaborador_empleado.persona.pk)},
+        )
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], str(self.contacto_propio.pk))
+
     # --- PerfilMedico (Colaborador SÍ ve el propio, confirmado 2026-09-24) ---
 
     def test_colaborador_can_read_their_own_perfil_medico(self):

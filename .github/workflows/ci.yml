@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: capital_humano_db
+          POSTGRES_USER: ch_user
+          POSTGRES_PASSWORD: ch_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U ch_user -d capital_humano_db"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+      DJANGO_SECRET_KEY: ci-secret-key-no-es-para-produccion
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_DB: capital_humano_db
+      POSTGRES_USER: ch_user
+      POSTGRES_PASSWORD: ch_password
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Revisar que no falten migraciones
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Revisiones de Django (manage.py check)
+        run: python manage.py check
+
+      - name: Ejecutar pruebas
+        run: python manage.py test --verbosity=2
