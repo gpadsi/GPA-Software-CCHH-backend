@@ -29,11 +29,24 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("path")
         parser.add_argument("--sheet", default=None)
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Importar aunque ya exista un lote previo con este mismo archivo (mismo contenido exacto).",
+        )
 
     def handle(self, *args, **options):
         path = Path(options["path"])
         if not path.exists():
             raise CommandError(f"No existe el archivo: {path}")
+
+        checksum = ImportBatch.checksum_for(path)
+        duplicado = ImportBatch.find_duplicate(ImportBatch.SOURCE_HORARIOS, checksum)
+        if duplicado is not None and not options["force"]:
+            raise CommandError(
+                f"Este archivo ya se importó antes (lote {duplicado.pk}, "
+                f"{duplicado.original_filename}, {duplicado.created_at:%Y-%m-%d %H:%M}) — "
+                f"mismo contenido exacto. Si de verdad quieres volver a importarlo, agrega --force."
+            )
 
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -55,6 +68,7 @@ class Command(BaseCommand):
         batch = ImportBatch.objects.create(
             source=ImportBatch.SOURCE_HORARIOS,
             original_filename=path.name,
+            file_checksum=checksum,
         )
 
         tipos_creados = 0

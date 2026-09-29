@@ -3,6 +3,8 @@
 # como llegó (staging crudo, sin transformar) y el mapeo de valores crudos
 # a registros reales (RawValueAlias). NO decide nada de negocio por sí sola
 # — eso lo hacen los comandos de importación de cada fuente (Fase B).
+import hashlib
+
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
@@ -28,7 +30,37 @@ class ImportBatch(BaseAuditModel):
 
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES, verbose_name="Origen")
     original_filename = models.CharField(max_length=255, verbose_name="Archivo original")
+    # SHA-256 del CONTENIDO del archivo (no del nombre) — detecta que ya se
+    # cargó este mismo archivo antes aunque lo hayan renombrado, y NO detecta
+    # como duplicado un archivo con el mismo nombre pero contenido corregido
+    # (ej. una sábana nueva de GPA). Blank en los lotes que ya existían antes
+    # de este campo — nunca se les va a poder calcular en retrospectiva.
+    file_checksum = models.CharField(
+        max_length=64, blank=True, db_index=True, verbose_name="Checksum del archivo",
+        help_text="SHA-256 del contenido exacto del archivo importado.",
+    )
     notes = models.TextField(blank=True, verbose_name="Notas")
+
+    @staticmethod
+    def checksum_for(path):
+        """SHA-256 del contenido de `path`, leído en bloques (no carga el archivo completo a memoria)."""
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def find_duplicate(cls, source, checksum):
+        """
+        El ImportBatch más reciente con el mismo origen y exactamente el mismo
+        contenido de archivo, si existe — o None. `checksum` vacío nunca
+        coincide con nada (evita que lotes viejos sin checksum, todos con
+        file_checksum="", se marquen como duplicados entre sí).
+        """
+        if not checksum:
+            return None
+        return cls.objects.filter(source=source, file_checksum=checksum).order_by("-created_at").first()
 
     def __str__(self):
         return f"{self.get_source_display()} — {self.original_filename} ({self.created_at:%Y-%m-%d %H:%M})"
