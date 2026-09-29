@@ -1,3 +1,4 @@
+import threading
 from datetime import date
 from io import StringIO
 
@@ -5,13 +6,13 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
-from django.test import RequestFactory, TestCase
+from django.db import IntegrityError, connection, transaction
+from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.employment.admin import ContratoInline
+from apps.employment.admin import ContratoInline, EmpleadoAdmin
 from apps.employment.models import CausaBaja, Contrato, Empleado, HistorialSalarial, OrigenBaja
 from apps.employment.services import dar_alta_nueva, dar_reingreso
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
@@ -486,6 +487,120 @@ class ContratoInlineMinNumTests(EmploymentTestDataMixin, TestCase):
         )
 
         self.assertTrue(formset.is_valid(), formset.errors)
+
+
+class AltaServiceRetryTests(EmploymentTestDataMixin, TestCase):
+    def test_reintentar_dar_alta_nueva_tras_corregir_el_conflicto_funciona(self):
+        posicion_ocupada = self.create_posicion()
+        self.create_contrato(empleado=self.create_empleado(), posicion=posicion_ocupada)
+        persona = self.create_persona()
+
+        with self.assertRaises(ValidationError):
+            dar_alta_nueva(persona=persona, posicion=posicion_ocupada, fecha_ingreso=date(2024, 1, 1))
+
+        # Reintento con la Posición correcta (el error fue elegir mal) funciona
+        # normal — el primer intento fallido no dejó nada a medias.
+        posicion_libre = self.create_posicion()
+        empleado, contrato = dar_alta_nueva(persona=persona, posicion=posicion_libre, fecha_ingreso=date(2024, 1, 1))
+
+        self.assertEqual(empleado.persona, persona)
+        self.assertEqual(contrato.posicion, posicion_libre)
+
+
+class AuditableAdminDeleteTests(EmploymentTestDataMixin, TestCase):
+    """apps.core.admin.AuditableAdminMixin.delete_model — quién borró un
+    registro desde el admin queda registrado (2026-09-29)."""
+
+    def test_delete_model_records_who_deleted_it(self):
+        empleado = self.create_empleado()
+        gestor = get_user_model().objects.create_user(
+            username="borra-gestor", email="borra-gestor@example.com", password="strong-test-password",
+        )
+        model_admin = EmpleadoAdmin(Empleado, admin.site)
+        request = RequestFactory().post("/admin/")
+        request.user = gestor
+
+        model_admin.delete_model(request, empleado)
+
+        borrado = Empleado.all_objects.get(pk=empleado.pk)
+        self.assertTrue(borrado.is_deleted)
+        self.assertEqual(borrado.deleted_by, gestor)
+
+
+class AltaServiceConcurrencyTests(TransactionTestCase):
+    """
+    Prueba de concurrencia real (TransactionTestCase + hilos, contra Postgres
+    de verdad, no TestCase): dos reingresos simultáneos del mismo Empleado.
+    select_for_update() + el UniqueConstraint de Contrato deben dejar pasar a
+    uno y rechazar limpio al otro con ValidationError -- nunca dos Contrato
+    vigentes ni un crash. No usa EmploymentTestDataMixin porque
+    setUpTestData no existe en TransactionTestCase (no envuelve las pruebas
+    en una transacción que se pueda revertir entre ellas).
+    """
+
+    def setUp(self):
+        super().setUp()
+        call_command("seed_tenant", stdout=StringIO())
+        call_command("seed_organizational_levels", stdout=StringIO())
+        call_command("seed_user_roles", stdout=StringIO())
+
+        empresa_level = OrganizationalLevel.objects.get(code="empresa")
+        company_node = OrganizationNode.objects.create(
+            level=empresa_level, code="GPA-CONC-TEST", name="Empresa de prueba",
+        )
+        estatus_activo = EstatusPosicion.objects.create(name="Colaborador Activo")
+
+        persona = Persona(first_name="Concu", last_name_paternal="Rrencia")
+        persona.full_clean()
+        persona.save()
+        self.empleado = Empleado(persona=persona)
+        self.empleado.full_clean()
+        self.empleado.save()
+
+        posicion_previa = Posicion(organization_node=company_node, estatus=estatus_activo)
+        posicion_previa.full_clean()
+        posicion_previa.save()
+        contrato_cerrado = Contrato(
+            empleado=self.empleado, posicion=posicion_previa,
+            fecha_ingreso=date(2019, 1, 1), fecha_baja=date(2020, 12, 31),
+        )
+        contrato_cerrado.full_clean()
+        contrato_cerrado.save()
+
+        self.posicion_a = Posicion(organization_node=company_node, estatus=estatus_activo)
+        self.posicion_a.full_clean()
+        self.posicion_a.save()
+        self.posicion_b = Posicion(organization_node=company_node, estatus=estatus_activo)
+        self.posicion_b.full_clean()
+        self.posicion_b.save()
+
+    def test_dos_reingresos_simultaneos_del_mismo_empleado_solo_uno_gana(self):
+        resultados = []
+        barrera = threading.Barrier(2)
+
+        def intentar(posicion):
+            try:
+                barrera.wait(timeout=5)
+                dar_reingreso(empleado=self.empleado, posicion=posicion, fecha_ingreso=date(2021, 1, 1))
+                resultados.append("ok")
+            except ValidationError:
+                resultados.append("rechazado")
+            except Exception as exc:  # diagnóstico si algo distinto revienta
+                resultados.append(f"error inesperado: {exc!r}")
+            finally:
+                connection.close()
+
+        hilo_a = threading.Thread(target=intentar, args=(self.posicion_a,))
+        hilo_b = threading.Thread(target=intentar, args=(self.posicion_b,))
+        hilo_a.start()
+        hilo_b.start()
+        hilo_a.join(timeout=10)
+        hilo_b.join(timeout=10)
+
+        self.assertFalse(hilo_a.is_alive(), "El primer reingreso quedó bloqueado.")
+        self.assertFalse(hilo_b.is_alive(), "El segundo reingreso quedó bloqueado.")
+        self.assertEqual(sorted(resultados), ["ok", "rechazado"])
+        self.assertEqual(self.empleado.contratos.filter(fecha_baja__isnull=True).count(), 1)
 
 
 class EmploymentAPIAuthenticationTests(EmploymentTestDataMixin, APITestCase):

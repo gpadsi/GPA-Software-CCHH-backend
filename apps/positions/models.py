@@ -1,5 +1,5 @@
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 from apps.core.models import BaseAuditModel, NamedCatalog
@@ -161,26 +161,52 @@ class Posicion(BaseAuditModel):
             ancestor = ancestor.reports_to
 
     def save(self, *args, **kwargs):
-        # Cada vez que cambia reports_to (incluida la primera vez que se
-        # guarda), se registra en HistorialReportaA — así nunca se pierde
-        # quién era el jefe antes de un reacomodo, aunque la Posición misma
-        # no cambie. reports_to se queda como está (el campo que se edita
-        # normal); esto solo lo audita solo, sin que nadie tenga que
-        # acordarse de hacerlo a mano.
-        is_new = self._state.adding
-        previous_reports_to_id = None
-        if not is_new:
-            previous_reports_to_id = (
-                Posicion.objects.filter(pk=self.pk).values_list("reports_to_id", flat=True).first()
+        # Cada vez que cambia reports_to o puesto (incluida la primera vez
+        # que se guarda), se registra en su historial correspondiente — así
+        # nunca se pierde quién era el jefe o qué Puesto tenía antes de un
+        # reacomodo, aunque la Posición misma no cambie. Sin esto, un
+        # Contrato antiguo que consulta posicion.puesto vería el Puesto de
+        # HOY, no el que tenía cuando ese Contrato estuvo vigente (detectado
+        # 2026-09-29). Ambos campos se quedan como están (se editan normal);
+        # esto solo los audita solo, sin que nadie tenga que acordarse de
+        # hacerlo a mano.
+        update_fields = kwargs.get("update_fields")
+        persisted_fields = None if update_fields is None else set(update_fields)
+        writes_reports_to = persisted_fields is None or bool(
+            {"reports_to", "reports_to_id"} & persisted_fields
+        )
+        writes_puesto = persisted_fields is None or bool({"puesto", "puesto_id"} & persisted_fields)
+
+        # El campo vigente y sus historiales son una sola operación. El lock
+        # serializa dos reclasificaciones concurrentes de la misma Posición:
+        # la segunda siempre compara contra el resultado ya confirmado por
+        # la primera, no contra una foto obsoleta.
+        with transaction.atomic():
+            is_new = self._state.adding
+            previous = None
+            if not is_new:
+                previous = (
+                    type(self).objects.select_for_update()
+                    .filter(pk=self.pk)
+                    .values("reports_to_id", "puesto_id")
+                    .first()
+                )
+                is_new = previous is None
+
+            reports_to_changed = is_new or (
+                writes_reports_to and previous["reports_to_id"] != self.reports_to_id
             )
-        reports_to_changed = is_new or previous_reports_to_id != self.reports_to_id
+            puesto_changed = is_new or (writes_puesto and previous["puesto_id"] != self.puesto_id)
 
-        super().save(*args, **kwargs)
+            super().save(*args, **kwargs)
 
-        if reports_to_changed:
-            hoy = timezone.now().date()
-            HistorialReportaA.objects.filter(posicion=self, fecha_fin__isnull=True).update(fecha_fin=hoy)
-            HistorialReportaA.objects.create(posicion=self, reports_to=self.reports_to, fecha_inicio=hoy)
+            hoy = timezone.localdate()
+            if reports_to_changed:
+                HistorialReportaA.objects.filter(posicion=self, fecha_fin__isnull=True).update(fecha_fin=hoy)
+                HistorialReportaA.objects.create(posicion=self, reports_to=self.reports_to, fecha_inicio=hoy)
+            if puesto_changed:
+                HistorialPuesto.objects.filter(posicion=self, fecha_fin__isnull=True).update(fecha_fin=hoy)
+                HistorialPuesto.objects.create(posicion=self, puesto=self.puesto, fecha_inicio=hoy)
 
     def __str__(self):
         return f"{self.puesto} — {self.area}"
@@ -224,3 +250,40 @@ class HistorialReportaA(BaseAuditModel):
         ordering = ["-fecha_inicio"]
         verbose_name = "Historial de a quién reporta"
         verbose_name_plural = "Historial de a quién reporta"
+
+
+class HistorialPuesto(BaseAuditModel):
+    """
+    Historial de qué Puesto tuvo cada Posición a lo largo del tiempo. Existe
+    porque Posicion.puesto es un campo "vigente" (se sobreescribe) — sin
+    esto, consultar un Contrato antiguo (apps.employment) vería el Puesto de
+    HOY de esa Posición, no el que tenía cuando ese Contrato estuvo vigente.
+    Se llena solo desde Posicion.save() (mismo patrón que
+    HistorialReportaA) — no se captura a mano.
+    """
+    posicion = models.ForeignKey(
+        Posicion, on_delete=models.CASCADE, related_name="historial_puesto",
+        verbose_name="Posición",
+    )
+    puesto = models.ForeignKey(
+        Puesto, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="historial_posiciones", verbose_name="Puesto",
+        help_text="Vacío significa que en este periodo la Posición no tenía Puesto capturado.",
+    )
+    fecha_inicio = models.DateField(verbose_name="Vigente desde")
+    fecha_fin = models.DateField(null=True, blank=True, verbose_name="Vigente hasta", help_text="Vacío = periodo actual.")
+
+    def __str__(self):
+        hasta = self.fecha_fin or "hoy"
+        return f"{self.posicion} — {self.puesto} ({self.fecha_inicio} – {hasta})"
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["posicion"], condition=models.Q(fecha_fin__isnull=True),
+                name="unique_historial_puesto_vigente_por_posicion",
+            ),
+        ]
+        ordering = ["-fecha_inicio"]
+        verbose_name = "Historial de Puesto"
+        verbose_name_plural = "Historial de Puesto"

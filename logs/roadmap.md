@@ -74,10 +74,26 @@ de alta o reingreso — Empleado y Contrato siempre juntos, en una sola
 transacción — y `EmpleadoAdmin` ya exige un Contrato al crear un Empleado
 nuevo (no al editar uno de los 121 pendientes). Un comando de solo
 lectura (`reportar_altas_pendientes`) reporta esos 145 pendientes
-(121 sin Contrato + 24 con todo cerrado) sin tocarlos. Pendiente: definir
-"vigente/activo" con precisión temporal (decisión de GPA, no de código) y
-decidir si la API pública también debe exigir Contrato al crear un
-Empleado — hoy solo el admin lo exige.
+(121 sin Contrato + 24 con todo cerrado) sin tocarlos. `HistorialPuesto`
+(mismo patrón que `HistorialReportaA`) registra qué Puesto tuvo cada
+Posición en el tiempo, para que un Contrato antiguo no muestre el Puesto
+de hoy si se reclasificó después — con su backfill para las 845
+Posiciones reales que ya existían (845 filas creadas, corrido contra la
+base). Matriz de pruebas: concurrencia real (dos reingresos simultáneos
+del mismo Empleado, uno pasa y el otro se rechaza limpio), reintentos,
+auditoría de quién borra desde el admin, y compatibilidad con las
+importaciones (ya resuelta de origen — `import_posiciones.py` ya
+atrapaba `ValidationError` por fila sin tronar el resto).
+
+**Pendiente, no de código sino de decisión (GPA):** definir
+"vigente/activo" con precisión temporal — ¿un alta con fecha futura ya
+cuenta como vigente hoy?, ¿el día exacto de la baja la persona sigue
+activa o no?, ¿GPA permite que alguien tenga Contrato vigente simultáneo
+en dos empresas del grupo? Esto último importa en particular porque el
+`UniqueConstraint` de arriba asume que NO — si GPA confirma que sí se
+permite, esa constraint hay que acotarla por empresa, no dejarla global
+por Empleado. También sin decidir: si la API pública debe exigir Contrato
+al crear un Empleado — hoy solo el admin lo exige.
 
 ## 3. Frontend Flutter — estado actual
 

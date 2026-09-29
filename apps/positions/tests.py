@@ -1,4 +1,6 @@
+from datetime import datetime, timezone as datetime_timezone
 from io import StringIO
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -6,6 +8,7 @@ from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -14,6 +17,7 @@ from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
+    HistorialPuesto,
     HistorialReportaA,
     Posicion,
     Puesto,
@@ -119,11 +123,109 @@ class HistorialReportaATests(PositionsTestDataMixin, TestCase):
             HistorialReportaA.objects.create(posicion=posicion, reports_to=None, fecha_inicio="2020-01-01")
 
 
+class HistorialPuestoTests(PositionsTestDataMixin, TestCase):
+    def test_creating_a_posicion_opens_a_vigente_row_even_without_puesto(self):
+        posicion = self.create_posicion()
+        historial = HistorialPuesto.objects.get(posicion=posicion)
+        self.assertIsNone(historial.puesto)
+        self.assertIsNone(historial.fecha_fin)
+
+    def test_changing_puesto_closes_the_previous_row_and_opens_a_new_one(self):
+        puesto_uno = Puesto.objects.create(name="Puesto uno")
+        puesto_dos = Puesto.objects.create(name="Puesto dos")
+        posicion = self.create_posicion(puesto=puesto_uno)
+
+        posicion.puesto = puesto_dos
+        posicion.save()
+
+        self.assertEqual(HistorialPuesto.objects.filter(posicion=posicion).count(), 2)
+        cerrado = HistorialPuesto.objects.get(posicion=posicion, fecha_fin__isnull=False)
+        vigente = HistorialPuesto.objects.get(posicion=posicion, fecha_fin__isnull=True)
+        self.assertEqual(cerrado.puesto_id, puesto_uno.pk)
+        self.assertEqual(vigente.puesto_id, puesto_dos.pk)
+
+        # Si crear el historial nuevo falla, tampoco debe persistir el
+        # cambio del campo vigente ni cerrarse la fila anterior.
+        posicion_rollback = self.create_posicion(puesto=puesto_uno)
+        posicion_rollback.puesto = puesto_dos
+        with patch(
+            "apps.positions.models.HistorialPuesto.objects.create",
+            side_effect=RuntimeError("fallo simulado del historial"),
+        ):
+            with self.assertRaises(RuntimeError):
+                posicion_rollback.save()
+        posicion_rollback.refresh_from_db()
+        vigente_rollback = HistorialPuesto.objects.get(
+            posicion=posicion_rollback, fecha_fin__isnull=True,
+        )
+        self.assertEqual(posicion_rollback.puesto_id, puesto_uno.pk)
+        self.assertEqual(vigente_rollback.puesto_id, puesto_uno.pk)
+
+    def test_saving_without_changing_puesto_does_not_create_a_new_row(self):
+        puesto = Puesto.objects.create(name="Puesto fijo")
+        puesto_no_persistido = Puesto.objects.create(name="Puesto solo en memoria")
+        posicion = self.create_posicion(puesto=puesto)
+        self.assertEqual(HistorialPuesto.objects.filter(posicion=posicion).count(), 1)
+
+        posicion.puesto = puesto_no_persistido
+        posicion.supervision_texto = "ALAN ARTEAGA"
+        posicion.save(update_fields=["supervision_texto"])
+
+        posicion.refresh_from_db()
+        self.assertEqual(posicion.puesto_id, puesto.pk)
+        self.assertEqual(HistorialPuesto.objects.filter(posicion=posicion).count(), 1)
+        self.assertEqual(HistorialPuesto.objects.get(posicion=posicion).puesto_id, puesto.pk)
+
+    def test_only_one_vigente_row_is_allowed_per_posicion(self):
+        posicion = self.create_posicion()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            HistorialPuesto.objects.create(posicion=posicion, puesto=None, fecha_inicio="2020-01-01")
+
+
+class BackfillHistorialPuestoTests(PositionsTestDataMixin, TestCase):
+    """apps.positions.management.commands.backfill_historial_puesto — abre
+    la fila vigente para Posiciones que ya existían antes de HistorialPuesto."""
+
+    def test_opens_a_vigente_row_for_posiciones_without_any_historial(self):
+        puesto = Puesto.objects.create(name="Puesto real")
+        posicion = self.create_posicion(puesto=puesto)
+        # Simula una Posición creada ANTES de que existiera HistorialPuesto.
+        HistorialPuesto.objects.filter(posicion=posicion).delete()
+
+        call_command("backfill_historial_puesto", stdout=StringIO())
+
+        historial = HistorialPuesto.objects.get(posicion=posicion)
+        self.assertEqual(historial.puesto_id, puesto.pk)
+        self.assertIsNone(historial.fecha_fin)
+        self.assertEqual(historial.fecha_inicio, timezone.localdate(posicion.created_at))
+
+    def test_does_not_duplicate_an_existing_historial_row(self):
+        posicion = self.create_posicion()  # ya trae su HistorialPuesto por Posicion.save()
+        instante_utc = datetime(2026, 9, 24, 4, 30, tzinfo=datetime_timezone.utc)
+        Posicion.objects.filter(pk=posicion.pk).update(created_at=instante_utc)
+        posicion.refresh_from_db()
+        historial = HistorialPuesto.objects.get(posicion=posicion)
+        historial.fecha_inicio = instante_utc.date()  # comportamiento UTC anterior
+        historial.save(update_fields=["fecha_inicio"])
+
+        call_command("backfill_historial_puesto", stdout=StringIO())
+
+        self.assertEqual(HistorialPuesto.objects.filter(posicion=posicion).count(), 1)
+        historial.refresh_from_db()
+        self.assertEqual(historial.fecha_inicio, timezone.localdate(instante_utc))
+
+
 class PositionsAdminConfigurationTests(TestCase):
     def test_historial_reporta_a_cannot_be_added_manually(self):
         from django.contrib import admin
         model_admin = admin.site._registry[HistorialReportaA]
         self.assertFalse(model_admin.has_add_permission(request=None))
+
+    def test_historial_puesto_cannot_be_added_manually(self):
+        from django.contrib import admin
+        model_admin = admin.site._registry[HistorialPuesto]
+        self.assertFalse(model_admin.has_add_permission(request=None))
+        self.assertFalse(model_admin.has_delete_permission(request=None))
 
 
 class PositionsAPIAuthenticationTests(PositionsTestDataMixin, APITestCase):

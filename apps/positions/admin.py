@@ -4,6 +4,7 @@ from apps.core.admin import AuditableAdminMixin, NamedCatalogAdmin, catalog_form
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
+    HistorialPuesto,
     HistorialReportaA,
     Posicion,
     Puesto,
@@ -74,4 +75,23 @@ class HistorialReportaAAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         # Se llena solo desde Posicion.save() — nadie lo captura a mano.
+        return False
+
+
+@admin.register(HistorialPuesto)
+class HistorialPuestoAdmin(admin.ModelAdmin):
+    list_display = ["posicion", "puesto", "fecha_inicio", "fecha_fin"]
+    list_filter = ["fecha_fin"]
+    search_fields = ["posicion__puesto__name", "puesto__name"]
+    autocomplete_fields = ["posicion", "puesto"]
+    fields = ["posicion", "puesto", "fecha_inicio", "fecha_fin"]
+    readonly_fields = ["posicion", "puesto", "fecha_inicio", "fecha_fin"]
+
+    def has_add_permission(self, request):
+        # Se llena solo desde Posicion.save() — nadie lo captura a mano.
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        # Es historial inmutable. Borrar la fila vigente rompería la cadena
+        # que Posicion.save() mantiene automáticamente.
         return False
