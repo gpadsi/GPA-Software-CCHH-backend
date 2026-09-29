@@ -197,6 +197,123 @@ class EmpleadoJefeResolutionTests(EmploymentTestDataMixin, TestCase):
         self.assertIsNone(jefe["empleado_id"])
 
 
+class ContratoSoftDeleteTests(EmploymentTestDataMixin, TestCase):
+    """
+    apps.core.models.SoftDeleteModel aplicado a Contrato (2026-09-29): es el
+    historial laboral, borrarlo de verdad borraría el pasado.
+    """
+    def test_delete_does_not_remove_the_row(self):
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        contrato.delete()
+
+        self.assertFalse(Contrato.objects.filter(pk=contrato.pk).exists())
+        borrado = Contrato.all_objects.get(pk=contrato.pk)
+        self.assertTrue(borrado.is_deleted)
+        self.assertIsNotNone(borrado.deleted_at)
+
+    def test_bulk_delete_also_soft_deletes(self):
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        # El admin muestra incluso los borrados usando all_objects y su
+        # acción delete_selected llama delete() sobre ese queryset. Ese
+        # camino también debe conservar el historial.
+        Contrato.all_objects.filter(pk=contrato.pk).delete()
+
+        self.assertFalse(Contrato.objects.filter(pk=contrato.pk).exists())
+        self.assertTrue(Contrato.all_objects.get(pk=contrato.pk).is_deleted)
+
+    def test_deleted_contrato_disappears_from_contrato_activo(self):
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        contrato.delete()
+
+        self.assertIsNone(empleado.get_contrato_activo())
+
+
+class EmpleadoSoftDeleteTests(EmploymentTestDataMixin, TestCase):
+    def test_delete_does_not_remove_the_row(self):
+        empleado = self.create_empleado(work_number="ADV0010")
+
+        empleado.delete()
+
+        self.assertFalse(Empleado.objects.filter(pk=empleado.pk).exists())
+        self.assertTrue(Empleado.all_objects.get(pk=empleado.pk).is_deleted)
+
+    def test_deleted_empleado_still_resolves_from_an_existing_contrato(self):
+        # Contrato._meta.base_manager_name="all_objects": sin esto, acceder a
+        # contrato.empleado después de borrar el Empleado reventaría con
+        # Empleado.DoesNotExist en vez de seguir resolviendo el registro.
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        empleado.delete()
+        contrato.refresh_from_db()
+
+        self.assertEqual(contrato.empleado.pk, empleado.pk)
+
+
+class ContratoReassignmentTests(EmploymentTestDataMixin, TestCase):
+    """No se puede mover un Contrato existente a otro Empleado — confirmado
+    con el usuario 2026-09-29, misma discusión que motivó el soft-delete."""
+
+    def test_cannot_reassign_an_existing_contrato_to_another_empleado(self):
+        contrato = self.create_contrato(empleado=self.create_empleado(), posicion=self.create_posicion())
+        contrato.empleado = self.create_empleado()
+
+        with self.assertRaises(ValidationError) as context:
+            contrato.full_clean()
+        self.assertIn("empleado", context.exception.message_dict)
+
+    def test_editing_other_fields_without_touching_empleado_still_works(self):
+        contrato = self.create_contrato(empleado=self.create_empleado(), posicion=self.create_posicion())
+
+        contrato.observaciones = "Corrección de dato clerical"
+        contrato.full_clean()
+        contrato.save()
+
+        contrato.refresh_from_db()
+        self.assertEqual(contrato.observaciones, "Corrección de dato clerical")
+
+
+class ReportarAltasPendientesCommandTests(EmploymentTestDataMixin, TestCase):
+    """apps.employment.management.commands.reportar_altas_pendientes — de
+    solo lectura, primer paso antes de blindar el alta (2026-09-29)."""
+
+    def test_reports_empleado_without_any_contrato(self):
+        self.create_empleado(work_number="ADV0001")
+
+        out = StringIO()
+        call_command("reportar_altas_pendientes", stdout=out)
+
+        self.assertIn("Sin ningun Contrato: 1", out.getvalue())
+        self.assertIn("ADV0001", out.getvalue())
+
+    def test_reports_empleado_with_only_closed_contratos(self):
+        empleado = self.create_empleado(work_number="ADV0002")
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion(), fecha_baja=date(2021, 1, 1))
+
+        out = StringIO()
+        call_command("reportar_altas_pendientes", stdout=out)
+
+        self.assertIn("Con Contrato(s) pero todos cerrados: 1", out.getvalue())
+        self.assertIn("ADV0002", out.getvalue())
+
+    def test_does_not_report_empleado_with_an_active_contrato(self):
+        empleado = self.create_empleado(work_number="ADV0003")
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        out = StringIO()
+        call_command("reportar_altas_pendientes", stdout=out)
+
+        self.assertIn("Sin ningun Contrato: 0", out.getvalue())
+        self.assertIn("Con Contrato(s) pero todos cerrados: 0", out.getvalue())
+        self.assertNotIn("ADV0003", out.getvalue())
+
+
 class EmploymentAPIAuthenticationTests(EmploymentTestDataMixin, APITestCase):
     def test_all_employment_endpoints_require_authentication(self):
         protected_urls = [
@@ -381,6 +498,46 @@ class EmpleadoContratoRoleAPITests(EmploymentTestDataMixin, APITestCase):
             reverse("empleado-contrato-vigente", args=[self.otro_empleado.pk])
         )
         self.assertEqual(other_response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- blindaje del historial (2026-09-29): borrado y reasignación ---
+
+    def test_gestor_cannot_reassign_a_contrato_to_another_empleado_via_api(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.patch(
+            reverse("contrato-detail", args=[self.contrato_propio.pk]),
+            {"empleado": str(self.otro_empleado.pk)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("empleado", response.data)
+        self.contrato_propio.refresh_from_db()
+        self.assertEqual(self.contrato_propio.empleado_id, self.colaborador_empleado.pk)
+
+    def test_deleting_a_contrato_via_api_soft_deletes_it(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.delete(reverse("contrato-detail", args=[self.contrato_propio.pk]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertFalse(Contrato.objects.filter(pk=self.contrato_propio.pk).exists())
+        borrado = Contrato.all_objects.get(pk=self.contrato_propio.pk)
+        self.assertTrue(borrado.is_deleted)
+        self.assertEqual(borrado.deleted_by, self.gestor)
+
+    def test_deleting_an_empleado_with_contratos_via_api_soft_deletes_it(self):
+        # Antes de este cambio esto tronaba con ProtectedError a medio DELETE
+        # real (Contrato.empleado es on_delete=PROTECT) — el soft-delete ya
+        # ni intenta el DELETE real, así que no hay nada que proteger.
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.delete(reverse("empleado-detail", args=[self.otro_empleado.pk]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertFalse(Empleado.objects.filter(pk=self.otro_empleado.pk).exists())
+        borrado = Empleado.all_objects.get(pk=self.otro_empleado.pk)
+        self.assertTrue(borrado.is_deleted)
+        self.assertEqual(borrado.deleted_by, self.gestor)
+        # Su Contrato sigue intacto y sigue resolviendo el Empleado por FK.
+        self.contrato_ajeno.refresh_from_db()
+        self.assertEqual(self.contrato_ajeno.empleado_id, self.otro_empleado.pk)
 
 
 class HistorialSalarialRoleAPITests(EmploymentTestDataMixin, APITestCase):

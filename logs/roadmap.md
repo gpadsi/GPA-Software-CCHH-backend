@@ -60,6 +60,17 @@ mocks; corre en cada push/PR a `main`).
   `apps/core/checks.py::_TEMPORARILY_OPTIONAL_FIELDS` (13 hoy) y
   `manage.py check` los recuerda en cada corrida hasta que se resuelvan.
 
+**En una rama aparte, sin fusionar a `main` todavía**
+(`blindaje-historial-laboral-pablo`): hoy se puede borrar físicamente el
+único Contrato de un Empleado o reasignarlo a otro sin que nada lo impida.
+`apps.core.models.SoftDeleteModel` (aplicado a Empleado y Contrato) hace
+que borrar cualquiera de los dos marque el registro en vez de borrarlo de
+la tabla, y bloquea reasignar un Contrato existente a otro Empleado. Un
+comando de solo lectura (`reportar_altas_pendientes`) reporta los 145
+Empleados pendientes de conciliar (121 sin Contrato + 24 con todo
+cerrado) sin tocarlos. Es el paso 1 de una alta atómica
+Empleado+Contrato todavía por construir (ver discusión 2026-09-29).
+
 ## 3. Frontend Flutter — estado actual
 
 Las 8 fases del plan de frontend están construidas y verificadas:

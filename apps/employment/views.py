@@ -67,6 +67,12 @@ def _crud_viewset(target_model, target_serializer_class, permission_classes=None
         def perform_update(self, serializer):
             serializer.save(updated_by=self.request.user)
 
+        def perform_destroy(self, instance):
+            # Sin efecto en HistorialSalarial (borrado físico normal); en
+            # Contrato (SoftDeleteModel) deja registrado quién lo borró.
+            instance.deleted_by = self.request.user
+            instance.delete()
+
     _ViewSet.__name__ = f"{target_model.__name__}ViewSet"
     return _ViewSet
 
@@ -103,6 +109,10 @@ class EmpleadoViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.deleted_by = self.request.user
+        instance.delete()
 
     @extend_schema(
         tags=["employment"],

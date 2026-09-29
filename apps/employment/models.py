@@ -2,7 +2,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
-from apps.core.models import BaseAuditModel, NamedCatalog
+from apps.core.models import BaseAuditModel, NamedCatalog, SoftDeleteModel
 from apps.persons.models import Persona
 from apps.positions.models import Posicion
 
@@ -35,12 +35,16 @@ class CausaBaja(NamedCatalog):
         verbose_name_plural = "Causas de baja"
 
 
-class Empleado(BaseAuditModel):
+class Empleado(SoftDeleteModel):
     """
     La relación laboral. `user` es OPCIONAL a propósito: no todo Empleado
     tiene o necesita cuenta de acceso al sistema. El rol de sistema
     (Colaborador/Capital Humano/Admin) vive en User, no aquí — "ser jefe de
     alguien" no es un rol, se resuelve vía Posicion.reports_to.
+
+    SoftDeleteModel (no BaseAuditModel directo): un Empleado nunca se borra
+    de verdad — es el expediente laboral completo, y su Contrato depende de
+    que siga existiendo.
     """
     persona = models.OneToOneField(
         Persona, on_delete=models.PROTECT, related_name="empleado",
@@ -90,16 +94,19 @@ class Empleado(BaseAuditModel):
     def __str__(self):
         return f"{self.work_number} — {self.persona}"
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         verbose_name = "Empleado"
         verbose_name_plural = "Empleados"
 
 
-class Contrato(BaseAuditModel):
+class Contrato(SoftDeleteModel):
     """
     Historial: qué Posición ocupó un Empleado, desde cuándo, hasta cuándo.
     ingreso/alta/reingreso son tres fechas independientes, NINGUNA se deriva
     de las otras (confirmado explícitamente por el usuario).
+
+    SoftDeleteModel: es el historial laboral en sí — borrarlo de verdad
+    borraría el pasado, no solo el presente.
     """
     empleado = models.ForeignKey(Empleado, on_delete=models.PROTECT, related_name="contratos", verbose_name="Empleado")
     posicion = models.ForeignKey(Posicion, on_delete=models.PROTECT, related_name="contratos", verbose_name="Posición")
@@ -130,6 +137,17 @@ class Contrato(BaseAuditModel):
 
     def clean(self):
         super().clean()
+        if self.pk:
+            empleado_original_id = (
+                type(self).all_objects.filter(pk=self.pk).values_list("empleado_id", flat=True).first()
+            )
+            if empleado_original_id is not None and empleado_original_id != self.empleado_id:
+                raise ValidationError({
+                    "empleado": (
+                        "Un Contrato no se puede reasignar a otro Empleado — "
+                        "corrige el registro si está mal, o da de baja este y crea uno nuevo."
+                    )
+                })
         if self.causa_baja_id and not self.origen_baja_id:
             raise ValidationError({"origen_baja": "Si capturas una causa de baja, el origen de baja es obligatorio."})
         if self.causa_baja_id and self.origen_baja_id and self.causa_baja.origen_baja_id != self.origen_baja_id:
@@ -143,7 +161,7 @@ class Contrato(BaseAuditModel):
     def __str__(self):
         return f"{self.empleado} — {self.posicion} (desde {self.fecha_ingreso})"
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ["-fecha_ingreso"]
         verbose_name = "Contrato"
         verbose_name_plural = "Contratos"

@@ -56,6 +56,13 @@ class AuditableAdminMixin:
         obj.updated_by = request.user
         super().save_model(request, obj, form, change)
 
+    def delete_model(self, request, obj):
+        # Sin efecto en un modelo de borrado físico normal (el registro
+        # desaparece de todas formas); en un SoftDeleteModel (ej. Empleado,
+        # Contrato) sí queda registrado quién lo marcó como borrado.
+        obj.deleted_by = request.user
+        obj.delete()
+
 
 class NamedCatalogAdmin(admin.ModelAdmin):
     """

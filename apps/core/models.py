@@ -7,6 +7,7 @@ from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
+from django.utils import timezone
 from django.utils.text import slugify
 
 
@@ -96,6 +97,57 @@ class BaseAuditModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class SoftDeleteQuerySet(models.QuerySet):
+    def delete(self):
+        # Borrado en bloque (ej. "Delete selected" del admin) también se
+        # marca — sin esto, solo el borrado de un objeto a la vez pasaría por
+        # el delete() de abajo.
+        return super().update(is_deleted=True, deleted_at=timezone.now())
+
+
+class SoftDeleteManager(models.Manager):
+    def get_queryset(self):
+        return SoftDeleteQuerySet(self.model, using=self._db).filter(is_deleted=False)
+
+
+class SoftDeleteAllManager(models.Manager):
+    def get_queryset(self):
+        # Incluye los registros marcados, pero conserva el QuerySet cuyo
+        # delete() hace borrado suave. Esto importa en el admin: sus vistas
+        # usan all_objects para mostrar el historial y delete_selected llama
+        # queryset.delete() sobre ese mismo manager.
+        return SoftDeleteQuerySet(self.model, using=self._db)
+
+
+class SoftDeleteModel(BaseAuditModel):
+    """
+    BaseAuditModel ya trae is_deleted/deleted_at/deleted_by pero, por sí
+    solos, no borran nada distinto — esta variante sí los usa. `objects` (el
+    manager normal) deja de ver lo marcado; `all_objects` lo sigue viendo,
+    para el admin y para que una ForeignKey hacia un registro ya marcado
+    (ej. Contrato.empleado) lo siga resolviendo en vez de romperse
+    (`base_manager_name` lo deja explícito: sin esto Django usaría `objects`
+    también ahí, y una FK hacia un registro marcado dejaría de resolver).
+
+    No es el default de BaseAuditModel a propósito — cambiar el
+    comportamiento de borrado de todo el proyecto de golpe, sin revisarlo
+    modelo por modelo, es más riesgo del que pide este cambio. Úsalo donde
+    de verdad importe conservar el historial ante un borrado (hoy: Empleado,
+    Contrato).
+    """
+    objects = SoftDeleteManager()
+    all_objects = SoftDeleteAllManager()
+
+    def delete(self, *args, **kwargs):
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
+
+    class Meta(BaseAuditModel.Meta):
+        abstract = True
+        base_manager_name = "all_objects"
 
 
 class DocumentType(models.Model):
