@@ -9,6 +9,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.locations.models import Area, Nave, Ubicacion
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.positions.models import (
     AlcanceDePosicion,
@@ -219,3 +220,135 @@ class PosicionRoleAPITests(PositionsTestDataMixin, APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("reports_to", response.data)
+
+
+class BackfillReportsToPorUnidadTests(PositionsTestDataMixin, TestCase):
+    """
+    apps.positions.management.commands.backfill_reports_to_por_unidad —
+    confirmado con el usuario 2026-09-29: la Posición cuyo Puesto tiene
+    es_gerencia_de_unidad=True es jefe de las demás Posiciones de su misma
+    Unidad de Negocio + Ubicación física.
+    """
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.otra_unidad = OrganizationNode.objects.create(
+            level=cls.company_node.level, code="GPA-POS-TEST-2", name="Otra unidad de prueba",
+        )
+        cls.gerencia_puesto = Puesto.objects.create(
+            name="Gerente de Unidad de Prueba", es_gerencia_de_unidad=True,
+        )
+        cls.puesto_normal = Puesto.objects.create(name="Auxiliar de prueba")
+
+    @staticmethod
+    def _area_en(nombre_ubicacion, con_nave=True):
+        ubicacion = Ubicacion.objects.create(code=nombre_ubicacion[:10].upper(), name=nombre_ubicacion)
+        if not con_nave:
+            return Area.objects.create(code="A1", name="Área sin nave")
+        nave = Nave.objects.create(ubicacion=ubicacion, code="N1")
+        return Area.objects.create(nave=nave, code="A1", name="Área 1")
+
+    def test_sin_ningun_puesto_marcado_no_hace_nada(self):
+        Puesto.objects.filter(pk=self.gerencia_puesto.pk).update(es_gerencia_de_unidad=False)
+        area = self._area_en("Planta Uno")
+        self.create_posicion(area=area, puesto=self.puesto_normal)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        self.assertEqual(Posicion.objects.filter(reports_to__isnull=False).count(), 0)
+
+    def test_asigna_jefe_solo_a_la_misma_unidad_y_ubicacion(self):
+        area_planta_1 = self._area_en("Planta Uno")
+        area_planta_2 = self._area_en("Planta Dos")
+
+        jefe = self.create_posicion(area=area_planta_1, puesto=self.gerencia_puesto)
+        mismo_alcance = self.create_posicion(area=area_planta_1, puesto=self.puesto_normal)
+        otra_ubicacion = self.create_posicion(area=area_planta_2, puesto=self.puesto_normal)
+        otra_unidad_misma_ubicacion = self.create_posicion(
+            area=area_planta_1, puesto=self.puesto_normal, organization_node=self.otra_unidad,
+        )
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        mismo_alcance.refresh_from_db()
+        otra_ubicacion.refresh_from_db()
+        otra_unidad_misma_ubicacion.refresh_from_db()
+        self.assertEqual(mismo_alcance.reports_to_id, jefe.pk)
+        self.assertIsNone(otra_ubicacion.reports_to_id)
+        self.assertIsNone(otra_unidad_misma_ubicacion.reports_to_id)
+
+    def test_el_jefe_puede_ver_a_sus_subordinados_por_la_relacion_inversa(self):
+        area = self._area_en("Planta Uno")
+        jefe = self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        subordinado_1 = self.create_posicion(area=area, puesto=self.puesto_normal)
+        subordinado_2 = self.create_posicion(area=area, puesto=self.puesto_normal)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        self.assertCountEqual(jefe.reportes.all(), [subordinado_1, subordinado_2])
+
+    def test_no_sobrescribe_un_reports_to_que_ya_existia(self):
+        area = self._area_en("Planta Uno")
+        jefe_de_unidad = self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        jefe_manual = self.create_posicion(area=area, puesto=self.puesto_normal)
+        posicion = self.create_posicion(area=area, puesto=self.puesto_normal, reports_to=jefe_manual)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        posicion.refresh_from_db()
+        self.assertEqual(posicion.reports_to_id, jefe_manual.pk)
+        self.assertNotEqual(posicion.reports_to_id, jefe_de_unidad.pk)
+
+    def test_dos_candidatos_en_el_mismo_alcance_es_ambiguo_y_no_asigna_nada(self):
+        area = self._area_en("Planta Uno")
+        self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        posicion = self.create_posicion(area=area, puesto=self.puesto_normal)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        posicion.refresh_from_db()
+        self.assertIsNone(posicion.reports_to_id)
+
+    def test_candidato_sin_nave_no_se_puede_usar_como_jefe(self):
+        area_sin_nave = self._area_en("Planta Uno", con_nave=False)
+        self.create_posicion(area=area_sin_nave, puesto=self.gerencia_puesto)
+        posicion = self.create_posicion(area=area_sin_nave, puesto=self.puesto_normal)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        posicion.refresh_from_db()
+        self.assertIsNone(posicion.reports_to_id)
+
+    def test_posicion_sin_area_no_recibe_jefe(self):
+        area = self._area_en("Planta Uno")
+        self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        sin_area = self.create_posicion(puesto=self.puesto_normal)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        sin_area.refresh_from_db()
+        self.assertIsNone(sin_area.reports_to_id)
+
+    def test_posicion_sin_puesto_capturado_igual_puede_recibir_jefe(self):
+        # Regresión: un filter(puesto__es_gerencia_de_unidad=False) excluiría
+        # estas filas solo por el INNER JOIN implícito de Django sobre una FK
+        # nula — el comando usa .exclude(...=True) a propósito para que sí
+        # se consideren.
+        area = self._area_en("Planta Uno")
+        jefe = self.create_posicion(area=area, puesto=self.gerencia_puesto)
+        sin_puesto = self.create_posicion(area=area, puesto=None)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        sin_puesto.refresh_from_db()
+        self.assertEqual(sin_puesto.reports_to_id, jefe.pk)
+
+    def test_la_cabeza_de_unidad_nunca_recibe_jefe_por_esta_regla(self):
+        area = self._area_en("Planta Uno")
+        jefe = self.create_posicion(area=area, puesto=self.gerencia_puesto)
+
+        call_command("backfill_reports_to_por_unidad", stdout=StringIO())
+
+        jefe.refresh_from_db()
+        self.assertIsNone(jefe.reports_to_id)

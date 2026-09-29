@@ -35,6 +35,9 @@ class EstatusPosicionAdmin(NamedCatalogAdmin):
 @admin.register(Puesto)
 class PuestoAdmin(NamedCatalogAdmin):
     form = catalog_form(Puesto)
+    list_display = ["name", "code", "is_active", "es_gerencia_de_unidad"]
+    list_filter = ["is_active", "es_gerencia_de_unidad"]
+    fields = ["name", "code", "is_active", "es_gerencia_de_unidad"]
 
 
 @admin.register(Posicion)

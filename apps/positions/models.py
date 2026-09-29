@@ -53,6 +53,23 @@ class Puesto(NamedCatalog):
     "(Ninguno)" literal) — normalizar eso es trabajo de RH con la lista
     real, no algo que deba inventarse aquí.
     """
+    # Confirmado con el usuario (2026-09-29): NO se marca por texto ("¿el
+    # nombre dice Gerente?") — hoy los 9 Puesto reales con "Gerente" en el
+    # nombre son roles funcionales distintos (Capital Humano, Mantenimiento,
+    # Seguridad...), no un "jefe de toda la unidad" genérico. Este campo se
+    # deja en False para todos hasta que GPA confirme qué Puesto SÍ
+    # representa "cabeza de la Unidad de Negocio" — RH lo marca a mano aquí
+    # cuando eso pase, sin tocar código. Ver
+    # backfill_reports_to_por_unidad (apps/positions), que usa este flag.
+    es_gerencia_de_unidad = models.BooleanField(
+        default=False, verbose_name="Es gerencia de la unidad",
+        help_text=(
+            "Quien ocupe una Posición con este Puesto es automáticamente el "
+            "jefe de todas las demás Posiciones de su misma Unidad de "
+            "Negocio y Ubicación física. Déjalo desmarcado salvo que GPA "
+            "haya confirmado que este Puesto específico cumple ese rol."
+        ),
+    )
 
     class Meta(NamedCatalog.Meta):
         verbose_name = "Puesto"

@@ -81,7 +81,15 @@ disco local, sin historial ni respaldo remoto.
 - `Posicion.reports_to` — 0 de 845 posiciones reales lo tienen resuelto;
   la columna "Supervisión" de la sábana mezcla nombres de persona y de
   unidad sin confirmar cuál es cuál (`Posicion.supervision_texto` guarda
-  el texto crudo mientras tanto).
+  el texto crudo mientras tanto). **Mecanismo ya listo (2026-09-29):**
+  `Puesto.es_gerencia_de_unidad` (marcar a mano en el admin el Puesto que
+  GPA confirme como "cabeza de la unidad") + el comando
+  `backfill_reports_to_por_unidad` (`apps/positions`) resuelven solos
+  quién es jefe de quién dentro de la misma Unidad de Negocio + Ubicación
+  física — sin adivinar por texto ("Gerente de X" hoy son 9 roles
+  funcionales distintos, no un jefe genérico de unidad, así que no se usó
+  ese patrón). Hoy no marca ningún Puesto, así que no asigna nada
+  todavía; corre solo cuando RH confirme cuál Puesto sí cumple ese rol.
 - El resto de los 13 campos de `_TEMPORARILY_OPTIONAL_FIELDS` (CURP/NSS/
   RFC/fecha de nacimiento/género de Persona, número de nómina, puesto y
   área de Posición, nave de Área, catorcena de las asignaciones).
