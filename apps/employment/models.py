@@ -165,6 +165,26 @@ class Contrato(SoftDeleteModel):
         ordering = ["-fecha_ingreso"]
         verbose_name = "Contrato"
         verbose_name_plural = "Contratos"
+        # A lo sumo un Contrato vigente (sin fecha_baja) por Empleado y por
+        # Posición — verificado 2026-09-29 contra la base real: 0 conflictos
+        # hoy sobre 435 vigentes, seguro de agregar. is_deleted=False en la
+        # condición a propósito: uno ya borrado nunca debe bloquear un alta
+        # nueva. Esto es el respaldo de BD (además del select_for_update en
+        # el servicio de alta) contra dos altas simultáneas incompatibles.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["empleado"],
+                condition=models.Q(is_deleted=False, fecha_baja__isnull=True),
+                name="unique_contrato_vigente_por_empleado",
+                violation_error_message="Este Empleado ya tiene un Contrato vigente — dale baja antes de crear uno nuevo.",
+            ),
+            models.UniqueConstraint(
+                fields=["posicion"],
+                condition=models.Q(is_deleted=False, fecha_baja__isnull=True),
+                name="unique_contrato_vigente_por_posicion",
+                violation_error_message="Esta Posición ya tiene un Contrato vigente — dale baja antes de asignar otro.",
+            ),
+        ]
 
 
 class HistorialSalarial(BaseAuditModel):

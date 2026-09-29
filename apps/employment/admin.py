@@ -32,6 +32,29 @@ class HistorialSalarialInline(admin.TabularInline):
     fields = ["monto", "fecha_vigencia"]
 
 
+class ContratoInline(admin.TabularInline):
+    model = Contrato
+    fk_name = "empleado"
+    extra = 1
+    fields = ["posicion", "fecha_ingreso", "fecha_baja"]
+    autocomplete_fields = ["posicion"]
+
+    def get_min_num(self, request, obj=None, **kwargs):
+        # Solo exige un Contrato al CREAR un Empleado -- confirmado con el
+        # usuario 2026-09-29: un Empleado no debe poder existir sin Contrato.
+        # Los ya existentes sin uno (ver reportar_altas_pendientes) siguen
+        # siendo editables sin que esto los bloquee de golpe.
+        return 1 if obj is None else 0
+
+    def get_formset(self, request, obj=None, **kwargs):
+        # min_num por sí solo controla cuántos formularios muestra Django,
+        # pero no rechaza un POST manipulado con TOTAL_FORMS=0. La validación
+        # del mínimo debe activarse explícitamente para que la regla también
+        # exista del lado del servidor.
+        kwargs["validate_min"] = True
+        return super().get_formset(request, obj, **kwargs)
+
+
 @admin.register(Empleado)
 class EmpleadoAdmin(AuditableAdminMixin, admin.ModelAdmin):
     list_display = ["work_number", "persona", "user", "is_deleted"]
@@ -39,7 +62,7 @@ class EmpleadoAdmin(AuditableAdminMixin, admin.ModelAdmin):
     search_fields = ["work_number", "persona__first_name", "persona__last_name_paternal", "persona__last_name_maternal"]
     autocomplete_fields = ["persona", "user"]
     fields = ["persona", "user", "work_number"]
-    inlines = [HistorialSalarialInline]
+    inlines = [ContratoInline, HistorialSalarialInline]
 
     def get_queryset(self, request):
         # Empleado.objects ya no ve lo borrado (SoftDeleteModel) — el admin sí

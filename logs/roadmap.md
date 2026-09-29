@@ -61,15 +61,23 @@ mocks; corre en cada push/PR a `main`).
   `manage.py check` los recuerda en cada corrida hasta que se resuelvan.
 
 **En una rama aparte, sin fusionar a `main` todavía**
-(`blindaje-historial-laboral-pablo`): hoy se puede borrar físicamente el
-único Contrato de un Empleado o reasignarlo a otro sin que nada lo impida.
+(`blindaje-historial-laboral-pablo`) — responde a si un Empleado debería
+depender de tener Contrato: hoy se puede borrar físicamente el único
+Contrato de un Empleado o reasignarlo a otro sin que nada lo impida.
 `apps.core.models.SoftDeleteModel` (aplicado a Empleado y Contrato) hace
 que borrar cualquiera de los dos marque el registro en vez de borrarlo de
 la tabla, y bloquea reasignar un Contrato existente a otro Empleado. Un
-comando de solo lectura (`reportar_altas_pendientes`) reporta los 145
-Empleados pendientes de conciliar (121 sin Contrato + 24 con todo
-cerrado) sin tocarlos. Es el paso 1 de una alta atómica
-Empleado+Contrato todavía por construir (ver discusión 2026-09-29).
+`UniqueConstraint` parcial garantiza a lo sumo un Contrato vigente por
+Empleado y por Posición. `apps/employment/services.py`
+(`dar_alta_nueva`/`dar_reingreso`) es el único camino soportado para dar
+de alta o reingreso — Empleado y Contrato siempre juntos, en una sola
+transacción — y `EmpleadoAdmin` ya exige un Contrato al crear un Empleado
+nuevo (no al editar uno de los 121 pendientes). Un comando de solo
+lectura (`reportar_altas_pendientes`) reporta esos 145 pendientes
+(121 sin Contrato + 24 con todo cerrado) sin tocarlos. Pendiente: definir
+"vigente/activo" con precisión temporal (decisión de GPA, no de código) y
+decidir si la API pública también debe exigir Contrato al crear un
+Empleado — hoy solo el admin lo exige.
 
 ## 3. Frontend Flutter — estado actual
 

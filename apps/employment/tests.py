@@ -1,16 +1,19 @@
 from datetime import date
 from io import StringIO
 
+from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.employment.admin import ContratoInline
 from apps.employment.models import CausaBaja, Contrato, Empleado, HistorialSalarial, OrigenBaja
+from apps.employment.services import dar_alta_nueva, dar_reingreso
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.persons.models import Persona
 from apps.positions.models import EstatusPosicion, Posicion
@@ -312,6 +315,177 @@ class ReportarAltasPendientesCommandTests(EmploymentTestDataMixin, TestCase):
         self.assertIn("Sin ningun Contrato: 0", out.getvalue())
         self.assertIn("Con Contrato(s) pero todos cerrados: 0", out.getvalue())
         self.assertNotIn("ADV0003", out.getvalue())
+
+
+class ContratoUnicidadVigenteTests(EmploymentTestDataMixin, TestCase):
+    """UniqueConstraint parcial (2026-09-29): a lo sumo un Contrato vigente
+    por Empleado y por Posición -- verificado contra la base real antes de
+    agregarla (0 conflictos sobre 435 vigentes)."""
+
+    def test_un_empleado_no_puede_tener_dos_contratos_vigentes(self):
+        empleado = self.create_empleado()
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        segundo = Contrato(empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=date(2021, 1, 1))
+        with self.assertRaises(ValidationError):
+            segundo.full_clean()
+
+    def test_una_posicion_no_puede_tener_dos_contratos_vigentes(self):
+        posicion = self.create_posicion()
+        self.create_contrato(empleado=self.create_empleado(), posicion=posicion)
+
+        segundo = Contrato(empleado=self.create_empleado(), posicion=posicion, fecha_ingreso=date(2021, 1, 1))
+        with self.assertRaises(ValidationError):
+            segundo.full_clean()
+
+    def test_un_empleado_si_puede_tener_dos_contratos_si_el_primero_ya_cerro(self):
+        empleado = self.create_empleado()
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion(), fecha_baja=date(2020, 12, 31))
+
+        segundo = Contrato(empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=date(2021, 1, 1))
+        segundo.full_clean()
+        segundo.save()
+
+        self.assertEqual(empleado.contratos.count(), 2)
+
+    def test_un_contrato_borrado_no_bloquea_un_alta_nueva_en_la_misma_posicion(self):
+        posicion = self.create_posicion()
+        viejo = self.create_contrato(empleado=self.create_empleado(), posicion=posicion)
+        viejo.delete()  # soft delete: is_deleted=True, fecha_baja sigue NULL
+
+        nuevo = Contrato(empleado=self.create_empleado(), posicion=posicion, fecha_ingreso=date(2021, 1, 1))
+        nuevo.full_clean()
+        nuevo.save()
+
+        self.assertTrue(Contrato.objects.filter(pk=nuevo.pk).exists())
+
+    def test_la_constraint_tambien_protege_a_nivel_de_base_de_datos(self):
+        # No solo full_clean(): un .create() directo que se salte la
+        # validacion de Django igual debe chocar contra la base.
+        empleado = self.create_empleado()
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Contrato.objects.create(
+                empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=date(2021, 1, 1),
+            )
+
+
+class AltaServiceTests(EmploymentTestDataMixin, TestCase):
+    """apps.employment.services — único camino soportado para dar de alta o
+    reingreso (2026-09-29): Empleado y Contrato siempre juntos, en una sola
+    transacción, nunca queda un Empleado suelto sin Contrato."""
+
+    def test_dar_alta_nueva_crea_empleado_y_contrato_juntos(self):
+        persona = self.create_persona()
+        posicion = self.create_posicion()
+
+        empleado, contrato = dar_alta_nueva(
+            persona=persona, posicion=posicion, fecha_ingreso=date(2024, 1, 1), work_number="ADV0100",
+        )
+
+        self.assertEqual(empleado.persona, persona)
+        self.assertEqual(contrato.empleado, empleado)
+        self.assertEqual(contrato.posicion, posicion)
+        self.assertTrue(Empleado.objects.filter(pk=empleado.pk).exists())
+        self.assertTrue(Contrato.objects.filter(pk=contrato.pk).exists())
+
+    def test_dar_alta_nueva_no_deja_nada_a_medias_si_el_contrato_es_invalido(self):
+        persona = self.create_persona()
+        posicion_ocupada = self.create_posicion()
+        self.create_contrato(empleado=self.create_empleado(), posicion=posicion_ocupada)
+
+        with self.assertRaises(ValidationError):
+            dar_alta_nueva(persona=persona, posicion=posicion_ocupada, fecha_ingreso=date(2024, 1, 1))
+
+        # Rollback completo: ni el Empleado a medio crear queda en la base.
+        self.assertFalse(Empleado.objects.filter(persona=persona).exists())
+
+        casos_invalidos = [
+            {"fecha_baja": date(2024, 1, 2)},
+            {"is_deleted": True},
+        ]
+        for numero, contrato_kwargs in enumerate(casos_invalidos, start=1):
+            with self.subTest(contrato_kwargs=contrato_kwargs):
+                persona_invalida = self.create_persona(first_name=f"Invalida {numero}")
+                with self.assertRaises(ValidationError):
+                    dar_alta_nueva(
+                        persona=persona_invalida,
+                        posicion=self.create_posicion(),
+                        fecha_ingreso=date(2024, 1, 1),
+                        **contrato_kwargs,
+                    )
+                self.assertFalse(Empleado.objects.filter(persona=persona_invalida).exists())
+
+    def test_dar_reingreso_agrega_contrato_a_empleado_existente(self):
+        empleado = self.create_empleado()
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion(), fecha_baja=date(2020, 12, 31))
+
+        empleado_resultado, contrato_nuevo = dar_reingreso(
+            empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=date(2021, 1, 1),
+        )
+
+        self.assertEqual(empleado_resultado.pk, empleado.pk)
+        self.assertEqual(empleado.contratos.count(), 2)
+        self.assertEqual(empleado.get_contrato_activo(), contrato_nuevo)
+
+    def test_dar_reingreso_rechaza_si_ya_tiene_un_contrato_vigente(self):
+        empleado = self.create_empleado()
+        self.create_contrato(empleado=empleado, posicion=self.create_posicion())
+
+        with self.assertRaises(ValidationError):
+            dar_reingreso(empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=date(2024, 1, 1))
+
+
+class ContratoInlineMinNumTests(EmploymentTestDataMixin, TestCase):
+    """EmpleadoAdmin exige un Contrato solo al CREAR (2026-09-29) — los 121
+    Empleado ya existentes sin Contrato (reportar_altas_pendientes) se
+    siguen pudiendo editar sin que esto los bloquee."""
+
+    def setUp(self):
+        super().setUp()
+        # No en setUpTestData a propósito: Django deepcopy-a esos atributos
+        # de clase entre pruebas, y un InlineModelAdmin/AdminSite no se puede
+        # deepcopy ("cannot pickle 'module' object").
+        self.request = RequestFactory().get("/admin/")
+        self.request.user = get_user_model().objects.create_superuser(
+            username="admin-inline", email="admin-inline@example.com", password="test-pass",
+        )
+        self.inline = ContratoInline(Empleado, admin.site)
+
+    def test_requiere_al_menos_un_contrato_al_crear(self):
+        formset_class = self.inline.get_formset(self.request, obj=None)
+        prefix = formset_class.get_default_prefix()
+        formset = formset_class(
+            data={
+                f"{prefix}-TOTAL_FORMS": "0",
+                f"{prefix}-INITIAL_FORMS": "0",
+                f"{prefix}-MIN_NUM_FORMS": "0",
+                f"{prefix}-MAX_NUM_FORMS": "1000",
+            },
+            instance=Empleado(),
+            prefix=prefix,
+        )
+
+        self.assertFalse(formset.is_valid())
+        self.assertTrue(formset.non_form_errors())
+
+    def test_no_exige_contrato_al_editar_uno_ya_existente(self):
+        empleado = self.create_empleado()
+        formset_class = self.inline.get_formset(self.request, obj=empleado)
+        prefix = formset_class.get_default_prefix()
+        formset = formset_class(
+            data={
+                f"{prefix}-TOTAL_FORMS": "0",
+                f"{prefix}-INITIAL_FORMS": "0",
+                f"{prefix}-MIN_NUM_FORMS": "0",
+                f"{prefix}-MAX_NUM_FORMS": "1000",
+            },
+            instance=empleado,
+            prefix=prefix,
+        )
+
+        self.assertTrue(formset.is_valid(), formset.errors)
 
 
 class EmploymentAPIAuthenticationTests(EmploymentTestDataMixin, APITestCase):
