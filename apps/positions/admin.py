@@ -26,6 +26,9 @@ class TipoPosicionAdmin(NamedCatalogAdmin):
 @admin.register(TipoRequisicion)
 class TipoRequisicionAdmin(NamedCatalogAdmin):
     form = catalog_form(TipoRequisicion)
+    list_display = ["name", "code", "is_active", "requiere_justificacion"]
+    list_filter = ["is_active", "requiere_justificacion"]
+    fields = ["name", "code", "is_active", "requiere_justificacion"]
 
 
 @admin.register(EstatusPosicion)

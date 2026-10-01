@@ -98,6 +98,25 @@ futuro hoy) — solo importa para datos nuevos.
 **Sigue sin decidir:** si la API pública también debe exigir Contrato al
 crear un Empleado — hoy solo el admin lo exige.
 
+**Anotado para el futuro (2026-10-01, no es inmediato):** RRHH
+comentó que SÍ podría existir el caso de alguien con Contrato activo en
+dos empresas del grupo al mismo tiempo, de forma temporal — mientras hace
+un "servicio"/préstamo a otra empresa del grupo, no como algo permanente.
+Hoy el `UniqueConstraint` de `Contrato` (ver arriba) lo bloquea siempre,
+sin importar la empresa. Es modificable pero no trivial — alcance
+aproximado:
+- Hoy la empresa de un Contrato no es un campo propio, se deduce
+  indirectamente vía `Contrato.posicion.organization_node`. Para acotar
+  la constraint "por empresa" en vez de global, lo más limpio es agregar
+  un campo de empresa directo en Contrato (la constraint de Postgres no
+  puede referenciar algo a dos saltos de FK de distancia).
+- Faltaría una forma de distinguir un Contrato "normal" de uno de
+  préstamo/comisión temporal (y probablemente exigirle fecha de término).
+- `Empleado.get_contrato_activo()` y `get_jefe()` hoy asumen que una
+  persona tiene A LO SUMO un Contrato activo — con dos simultáneos hay
+  que decidir cuál cuenta como "el principal" para esas dos cosas.
+No se toca nada de esto sin que el usuario lo pida explícitamente.
+
 ## 3. Frontend Flutter — estado actual
 
 Las 8 fases del plan de frontend están construidas y verificadas:
@@ -189,9 +208,9 @@ mejor:
 - **`evaluations`** (evaluaciones mensuales jefe↔empleado con rotación) —
   existía completo en `ch-capital-humano`. No hay pedido concreto todavía
   ni datos reales de GPA sobre este proceso.
-- **`recruitment`** (vacantes/postulaciones/etapas) — existía en los dos
-  repos abandonados. El frontend ya tiene el placeholder "Reclutamiento"
-  esperando a que esto se decida construir.
+- ~~`recruitment` (vacantes/postulaciones/etapas)~~ — ya no aplica: se
+  decidió construir (ver §7), no se portó nada de los repos abandonados,
+  se diseñó desde cero basado en los formularios reales de GPA.
 - **`surveys`** (encuestas) — existía en `gpa-capital-humano`. Se
   relaciona con el placeholder "Buzz" del frontend, pero Buzz ahí es más
   bien un muro de comunicados, no encuestas — son dos cosas distintas.
@@ -203,6 +222,95 @@ mejor:
   (`notifications`)** — existían en `ch-capital-humano`. Hoy la
   auditoría vive como campos en cada modelo (`BaseAuditModel`), suficiente
   para lo que se ha pedido.
+
+## 7. Reclutamiento / Vacantes — en construcción (rama `reclutamiento-vacantes-pablo`)
+
+Basado en 3 documentos reales de GPA, ya copiados al repo en
+`apps/recruitment/plantillas_oficiales/`: `FO-C0-CH-01_Requisición_de_Personal`,
+`FO-C0-CH-08_Reemplazo_de_Personal` (casi idénticos — Reemplazo omite la
+sección de justificación) y `FO-C0-CH-04_Descriptivo_de_puesto`.
+
+**Ya construido (2026-10-01):** app `apps.recruitment` con `Requisicion` +
+`AprobacionRequisicion` + los 4 catálogos nuevos + el flag
+`TipoRequisicion.requiere_justificacion` — ver `logs/dev_log.csv` sesión 8
+para el detalle. 14 pruebas nuevas, 203 en total.
+
+**Reutiliza sin tocar:** `Posicion.tipo_requisicion`/`estatus` (ya traen
+Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
+`solicitante_vacante`, fechas de registro/autorización de vacante,
+`Attachment` (hoy sin uso).
+
+**Decisiones ya tomadas en la conversación:**
+- `Requisicion` (app nueva `apps/recruitment`) con **su propio** `tipo`
+  (no lee `Posicion.tipo_requisicion` — una misma Posición puede tener
+  varias Requisiciones en su vida) y **su propio** `estado` (borrador →
+  pendiente → autorizada/rechazada → en reclutamiento → cubierta/cancelada),
+  independiente de `Posicion.estatus`. Restricción: una sola Requisición
+  abierta a la vez por Posición (mismo patrón que `UniqueConstraint` de
+  Contrato).
+- `area_solicitante` es un campo NUEVO en `Requisicion` (texto libre por
+  ahora) — confirmado que NO es lo mismo que `Posicion.area` (esa es la
+  ubicación física: Ubicación→Nave→Área).
+- Aprobación con `AprobacionRequisicion` (tabla hija, 4 etapas: Jefe
+  Inmediato, Gerencia del Área, Dirección General/VP, Capital Humano), sin
+  orden estricto entre etapas. Cada etapa guarda fecha + o bien un usuario
+  del sistema (si se aceptó ahí) o un nombre capturado a mano + documento
+  firmado adjunto (si fue en papel) — cubre ambos casos sin tener que
+  elegir uno de antemano.
+- Cualquier usuario autenticado puede CREAR una Requisición (no solo
+  Capital Humano/Admin) — un Gerente/Director sigue siendo rol
+  "Colaborador" en el sistema (no existe rol de gerencia aparte), así que
+  el filtro real es el flujo de aprobación, no el permiso de creación.
+  `created_by` ya registra quién la levantó, sin campo nuevo.
+- `DescriptivoPuesto` ligado a **Posición** (no a Puesto — confirmado:
+  Puesto es el catálogo de título reutilizable, hoy 248 Puesto para 845
+  Posición reales; Posición es la plaza específica con su propia área,
+  empresa y jefe). Versionado (mismo patrón que `HistorialPuesto`): cada
+  versión queda congelada, la conformidad del colaborador se liga a la
+  versión + la persona específica, se puede copiar una versión existente
+  para editar.
+- Catálogos confirmados directo del Word (sin inventar): `CompetenciaConductual`
+  (12 valores) y `RecursoAsignado` (10 valores) — ambos con M2M desde
+  `DescriptivoPuesto`.
+- Pendiente de resolver con quien maneja nómina, no se inventa aquí: la
+  relación entre sueldo mensual compuesto/bruto/neto de la Requisición.
+- **Exportar con el formato oficial exacto, confirmado para los 3
+  documentos** (2026-10-01): al terminar de capturar una Requisición o un
+  Descriptivo de Puesto en la app, debe poder descargarse como el mismo
+  archivo oficial de GPA (el `.xlsx` de Requisición o Reemplazo según
+  `tipo`, o el `.docx` de Descriptivo de Puesto), lleno, para imprimir —
+  sin rediseñarlo nunca.
+  - Excel (Requisición/Reemplazo): `openpyxl` escribiendo sobre una copia
+    de la plantilla oficial (ya se usa en el proyecto para los imports).
+  - Word (Descriptivo de Puesto): necesita una librería nueva
+    (`python-docx`, hoy no instalada) o manipular el XML directamente
+    (igual que se hizo para leer el archivo en esta conversación). Los
+    checkboxes de competencias (12) y recursos (10) son controles de
+    contenido nativos de Word (`w:sdt`), no casillas de texto simples —
+    hay que resolver cómo marcarlos programáticamente sin romper el
+    documento; se resuelve en la Entrega 2 (cuando se construya
+    `DescriptivoPuesto`), no es parte de la Entrega 1.
+  - Las 3 plantillas oficiales hay que incorporarlas al repo (no quedarse
+    solo en el `Downloads` local) como archivo versionado, no como dato
+    de usuario en `media/`.
+- **Prerrequisito de seguridad antes de guardar CV o documentos firmados
+  en `Attachment`**: `nginx/capital_humano.conf` sirve `/media/` directo,
+  sin pasar por los permisos de Django — hay que arreglarlo antes, no es
+  parte del módulo en sí pero se vuelve urgente con este módulo.
+- Las 90 Posición ya vacantes hoy no se les va a inventar firmas ni
+  fechas de aprobación — se resuelve con un comando de solo lectura
+  (mismo patrón que `reportar_altas_pendientes`) antes de decidir si se
+  migran con una Requisición "sin aprobación digital" o se dejan fuera.
+
+**Orden de entrega acordado:** 1) Requisición completa de punta a punta
+(incluye el export a Excel y el fix de nginx) → 2) Descriptivo de Puesto
+versionado → 3) Candidatos (opcional, ligero: nombre/contacto/etapa/
+notas/CV vía `Attachment`).
+
+**Anotado para después, no ahora:** en el organigrama del frontend, por
+ahora solo mostrar la secuencia (quién reporta a quién), sin desplegar
+todos los campos de cada nodo — evita que se vea saturado o duplicado.
+Poder entrar al detalle de cada Posición desde ahí es un plan futuro.
 - **`files` con validación de contenido real (WebP, firma de archivo)** —
   existía en ambos repos abandonados. `apps.core` ya tiene adjuntos
   genéricos (`Attachment`) pero sin esa validación específica.

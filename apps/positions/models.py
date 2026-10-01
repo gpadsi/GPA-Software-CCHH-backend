@@ -27,6 +27,15 @@ class TipoPosicion(NamedCatalog):
 class TipoRequisicion(NamedCatalog):
     """Confirmado: Reemplazo, Nueva Posición."""
 
+    # Confirmado contra los formularios reales de GPA (2026-10-01): el de
+    # Reemplazo de Personal NO trae la sección "Justificación de la
+    # Requisición del Puesto"; el de Requisición (Nueva Posición) sí.
+    # apps.recruitment.Requisicion.clean() usa este flag en vez de
+    # comparar el nombre del tipo a mano.
+    requiere_justificacion = models.BooleanField(
+        default=False, verbose_name="Requiere justificación",
+    )
+
     class Meta(NamedCatalog.Meta):
         verbose_name = "Tipo de requisición"
         verbose_name_plural = "Tipos de requisición"
