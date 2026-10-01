@@ -85,15 +85,18 @@ auditoría de quién borra desde el admin, y compatibilidad con las
 importaciones (ya resuelta de origen — `import_posiciones.py` ya
 atrapaba `ValidationError` por fila sin tronar el resto).
 
-**Pendiente, no de código sino de decisión (GPA):** definir
-"vigente/activo" con precisión temporal — ¿un alta con fecha futura ya
-cuenta como vigente hoy?, ¿el día exacto de la baja la persona sigue
-activa o no?, ¿GPA permite que alguien tenga Contrato vigente simultáneo
-en dos empresas del grupo? Esto último importa en particular porque el
-`UniqueConstraint` de arriba asume que NO — si GPA confirma que sí se
-permite, esa constraint hay que acotarla por empresa, no dejarla global
-por Empleado. También sin decidir: si la API pública debe exigir Contrato
-al crear un Empleado — hoy solo el admin lo exige.
+**Ya resuelto (GPA confirmó 2026-09-30):** "activo" cuenta desde que la
+persona EMPIEZA a trabajar, no desde que se registra el alta; el día
+exacto de la baja ya NO cuenta como activo; y nunca puede haber dos
+contratos activos al mismo tiempo (confirma que el `UniqueConstraint`
+global, sin acotar por empresa, estaba bien). `ContratoQuerySet.
+vigentes_en()`/`vigentes_hoy()` centraliza esta regla; `get_contrato_activo()`
+y `get_jefe()` ya la usan. Verificado contra la base real: no cambia
+ninguna respuesta actual (0 Contrato con fecha de ingreso o de baja a
+futuro hoy) — solo importa para datos nuevos.
+
+**Sigue sin decidir:** si la API pública también debe exigir Contrato al
+crear un Empleado — hoy solo el admin lo exige.
 
 ## 3. Frontend Flutter — estado actual
 
@@ -105,9 +108,11 @@ secciones placeholder (Licencias, Reclutamiento, Desempeño, Tiempo, Buzz
 (animación de entrada en el Dashboard, accesibilidad, sin jank
 detectable). 91 pruebas automatizadas, `flutter analyze` limpio.
 
-**Pendiente, no por alcance sino por higiene de proyecto:** el directorio
-del frontend no tiene repo git propio. Todo ese trabajo vive solo en
-disco local, sin historial ni respaldo remoto.
+**Pendiente de construir cuando el usuario lo confirme** (anotado
+2026-10-01, no empezar sin esa confirmación): un apartado para filtrar
+por Puesto en el front — ligado a `HistorialPuesto` (backend, rama
+`blindaje-historial-laboral-pablo`), que hoy solo guarda el historial sin
+que nada en el front ni la API lo consuma todavía.
 
 ## 4. Lo que falta por DATO (esperando a GPA, no es trabajo de programar)
 

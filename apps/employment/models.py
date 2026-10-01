@@ -1,8 +1,9 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
-from apps.core.models import BaseAuditModel, NamedCatalog, SoftDeleteModel
+from apps.core.models import BaseAuditModel, NamedCatalog, SoftDeleteManager, SoftDeleteModel, SoftDeleteQuerySet
 from apps.persons.models import Persona
 from apps.positions.models import Posicion
 
@@ -60,8 +61,8 @@ class Empleado(SoftDeleteModel):
     work_number = models.CharField(max_length=30, unique=True, null=True, blank=True, verbose_name="Número de nómina")
 
     def get_contrato_activo(self):
-        """El Contrato vigente (sin fecha_baja) más reciente, si hay alguno."""
-        return self.contratos.filter(fecha_baja__isnull=True).first()
+        """El Contrato activo hoy (ya empezó, y si tiene baja todavía no llega) más reciente, si hay alguno."""
+        return self.contratos.vigentes_hoy().first()
 
     def get_jefe(self):
         """
@@ -79,9 +80,7 @@ class Empleado(SoftDeleteModel):
 
         contrato_jefe = None
         if posicion_jefe is not None:
-            contrato_jefe = Contrato.objects.filter(
-                posicion=posicion_jefe, fecha_baja__isnull=True
-            ).first()
+            contrato_jefe = Contrato.objects.vigentes_hoy().filter(posicion=posicion_jefe).first()
         empleado_jefe = contrato_jefe.empleado if contrato_jefe else None
 
         return {
@@ -99,6 +98,38 @@ class Empleado(SoftDeleteModel):
         verbose_name_plural = "Empleados"
 
 
+class ContratoQuerySet(SoftDeleteQuerySet):
+    def vigentes_en(self, fecha):
+        """
+        "Activo" en una fecha dada — confirmado con el usuario 2026-09-30:
+        ya empezó a trabajar (fecha_ingreso <= fecha) y, si ya tiene fecha de
+        baja capturada, esa fecha todavía no llega (el día de la baja en sí
+        YA NO cuenta como activo, por eso es __gt y no __gte). Distinto del
+        "vigente" que usa el UniqueConstraint de abajo (fecha_baja IS NULL,
+        es decir "todavía no se cerró el registro") — un Contrato con baja
+        capturada a futuro sigue sin estar cerrado y aun así puede no estar
+        "activo hoy" si fecha_ingreso todavía no llega, o seguir activo hoy
+        aunque ya tenga baja fijada para más adelante.
+        """
+        return self.filter(fecha_ingreso__lte=fecha).filter(
+            models.Q(fecha_baja__isnull=True) | models.Q(fecha_baja__gt=fecha)
+        )
+
+    def vigentes_hoy(self):
+        return self.vigentes_en(timezone.localdate())
+
+
+class ContratoManager(SoftDeleteManager):
+    def get_queryset(self):
+        return ContratoQuerySet(self.model, using=self._db).filter(is_deleted=False)
+
+    def vigentes_en(self, fecha):
+        return self.get_queryset().vigentes_en(fecha)
+
+    def vigentes_hoy(self):
+        return self.get_queryset().vigentes_hoy()
+
+
 class Contrato(SoftDeleteModel):
     """
     Historial: qué Posición ocupó un Empleado, desde cuándo, hasta cuándo.
@@ -108,6 +139,8 @@ class Contrato(SoftDeleteModel):
     SoftDeleteModel: es el historial laboral en sí — borrarlo de verdad
     borraría el pasado, no solo el presente.
     """
+    objects = ContratoManager()
+
     empleado = models.ForeignKey(Empleado, on_delete=models.PROTECT, related_name="contratos", verbose_name="Empleado")
     posicion = models.ForeignKey(Posicion, on_delete=models.PROTECT, related_name="contratos", verbose_name="Posición")
 
@@ -165,12 +198,19 @@ class Contrato(SoftDeleteModel):
         ordering = ["-fecha_ingreso"]
         verbose_name = "Contrato"
         verbose_name_plural = "Contratos"
-        # A lo sumo un Contrato vigente (sin fecha_baja) por Empleado y por
-        # Posición — verificado 2026-09-29 contra la base real: 0 conflictos
-        # hoy sobre 435 vigentes, seguro de agregar. is_deleted=False en la
-        # condición a propósito: uno ya borrado nunca debe bloquear un alta
-        # nueva. Esto es el respaldo de BD (además del select_for_update en
-        # el servicio de alta) contra dos altas simultáneas incompatibles.
+        # A lo sumo un Contrato ABIERTO (sin fecha_baja, sin importar si ya
+        # empezó o no) por Empleado y por Posición — confirmado con el
+        # usuario 2026-09-30: nunca puede haber dos contratos activos al
+        # mismo tiempo. Esta es la invariante de base de datos (no puede
+        # depender de "hoy", un índice parcial de Postgres exige una
+        # condición estática) — distinta de ContratoQuerySet.vigentes_en(),
+        # que sí es consciente de la fecha y es la que responde "¿está
+        # activo ESTE día en particular?". Verificado 2026-09-29 contra la
+        # base real: 0 conflictos sobre 435 abiertos, seguro de agregar.
+        # is_deleted=False en la condición a propósito: uno ya borrado nunca
+        # debe bloquear un alta nueva. Esto es el respaldo de BD (además del
+        # select_for_update en el servicio de alta) contra dos altas
+        # simultáneas incompatibles.
         constraints = [
             models.UniqueConstraint(
                 fields=["empleado"],

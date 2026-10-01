@@ -1,5 +1,5 @@
 import threading
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 
 from django.contrib import admin
@@ -9,6 +9,7 @@ from django.core.management import call_command
 from django.db import IntegrityError, connection, transaction
 from django.test import RequestFactory, TestCase, TransactionTestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -192,6 +193,62 @@ class EmpleadoJefeResolutionTests(EmploymentTestDataMixin, TestCase):
             fecha_ingreso=date(2018, 1, 1), fecha_baja=date(2020, 1, 1),
         )
 
+        empleado = self.create_empleado()
+        posicion_propia = self.create_posicion(reports_to=posicion_jefe)
+        self.create_contrato(empleado=empleado, posicion=posicion_propia)
+
+        jefe = empleado.get_jefe()
+        self.assertEqual(jefe["posicion_id"], posicion_jefe.id)
+        self.assertIsNone(jefe["empleado_id"])
+
+
+class ContratoVigenciaTemporalTests(EmploymentTestDataMixin, TestCase):
+    """
+    ContratoQuerySet.vigentes_en/vigentes_hoy — confirmado con el usuario
+    2026-09-30: activo empieza a contar hasta que la persona EMPIEZA a
+    trabajar (no desde que se registra), y el día de la baja ya NO cuenta
+    como activo.
+    """
+
+    def test_un_contrato_con_fecha_de_ingreso_futura_no_cuenta_como_activo_todavia(self):
+        empleado = self.create_empleado()
+        self.create_contrato(
+            empleado=empleado, posicion=self.create_posicion(),
+            fecha_ingreso=timezone.localdate() + timedelta(days=15),
+        )
+        self.assertIsNone(empleado.get_contrato_activo())
+
+    def test_el_mismo_contrato_si_cuenta_como_activo_una_vez_que_llega_la_fecha_de_ingreso(self):
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(
+            empleado=empleado, posicion=self.create_posicion(), fecha_ingreso=timezone.localdate(),
+        )
+        self.assertEqual(empleado.get_contrato_activo(), contrato)
+
+    def test_el_dia_exacto_de_la_baja_ya_no_cuenta_como_activo(self):
+        empleado = self.create_empleado()
+        self.create_contrato(
+            empleado=empleado, posicion=self.create_posicion(),
+            fecha_ingreso=timezone.localdate() - timedelta(days=30), fecha_baja=timezone.localdate(),
+        )
+        self.assertIsNone(empleado.get_contrato_activo())
+
+    def test_un_dia_antes_de_la_baja_todavia_cuenta_como_activo(self):
+        empleado = self.create_empleado()
+        contrato = self.create_contrato(
+            empleado=empleado, posicion=self.create_posicion(),
+            fecha_ingreso=timezone.localdate() - timedelta(days=30),
+            fecha_baja=timezone.localdate() + timedelta(days=1),
+        )
+        self.assertEqual(empleado.get_contrato_activo(), contrato)
+
+    def test_get_jefe_no_resuelve_un_jefe_cuyo_contrato_todavia_no_empieza(self):
+        posicion_jefe = self.create_posicion()
+        jefe_empleado = self.create_empleado()
+        self.create_contrato(
+            empleado=jefe_empleado, posicion=posicion_jefe,
+            fecha_ingreso=timezone.localdate() + timedelta(days=15),
+        )
         empleado = self.create_empleado()
         posicion_propia = self.create_posicion(reports_to=posicion_jefe)
         self.create_contrato(empleado=empleado, posicion=posicion_propia)
