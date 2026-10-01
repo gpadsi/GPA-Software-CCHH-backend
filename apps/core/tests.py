@@ -1,14 +1,19 @@
+import shutil
+import tempfile
 from io import StringIO
 from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.models import ContentType
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.core.models import Attachment
 from apps.core.permissions import (
     IsCapitalHumanoOrAdmin,
     IsCapitalHumanoOrAdminOrReadOnly,
@@ -16,6 +21,7 @@ from apps.core.permissions import (
     es_gestion_rrhh,
     scope_to_own_unless_management,
 )
+from apps.core.serializers import AttachmentSerializer
 from apps.employment.models import Empleado
 from apps.persons.models import Genero, Persona
 from apps.users.models import UserRole
@@ -204,3 +210,66 @@ class AttachmentRoleAPITests(APITestCase):
         self.client.force_authenticate(user=self.gestor)
         response = self.client.get(reverse("attachment-list-create"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+_ATTACHMENT_TEST_MEDIA_ROOT = tempfile.mkdtemp()
+
+
+@override_settings(MEDIA_ROOT=_ATTACHMENT_TEST_MEDIA_ROOT)
+class AttachmentDownloadAPITests(APITestCase):
+    """
+    AttachmentDownloadView (2026-10-01) -- antes de esto, nginx servía
+    /media/ directo en producción, sin pasar por ningún permiso de Django;
+    cualquiera con la URL del archivo lo podía bajar. Ahora la única forma
+    soportada de bajar un adjunto es por aquí, con el mismo permiso que el
+    resto de Attachment.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_user_roles", stdout=StringIO())
+        user_model = get_user_model()
+        cls.gestor = user_model.objects.create_user(
+            username="attachment-download-gestor", email="attachment-download-gestor@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="capital-humano"),
+        )
+        cls.colaborador = user_model.objects.create_user(
+            username="attachment-download-colaborador", email="attachment-download-colaborador@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="colaborador"),
+        )
+        cls.genero = Genero.objects.create(name="Género de prueba para adjuntos")
+        cls.attachment = Attachment.objects.create(
+            content_type=ContentType.objects.get_for_model(Genero),
+            object_id=str(cls.genero.pk),
+            file=SimpleUploadedFile("acta.pdf", b"contenido de prueba", content_type="application/pdf"),
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_ATTACHMENT_TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def _download_url(self):
+        return reverse("attachment-download", args=[self.attachment.pk])
+
+    def test_anonymous_cannot_download(self):
+        response = self.client.get(self._download_url())
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_colaborador_cannot_download(self):
+        self.client.force_authenticate(user=self.colaborador)
+        response = self.client.get(self._download_url())
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_gestor_can_download_the_real_file_content(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.get(self._download_url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(b"".join(response.streaming_content), b"contenido de prueba")
+
+    def test_serializer_file_url_points_to_the_protected_endpoint_not_media(self):
+        serializer = AttachmentSerializer(self.attachment, context={"request": None})
+        file_url = serializer.data["file_url"]
+        self.assertIn("/download/", file_url)
+        self.assertNotIn("/media/", file_url)
+        self.assertNotIn("file", serializer.data)

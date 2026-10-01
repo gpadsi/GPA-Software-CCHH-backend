@@ -297,10 +297,12 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
   - Las 3 plantillas oficiales hay que incorporarlas al repo (no quedarse
     solo en el `Downloads` local) como archivo versionado, no como dato
     de usuario en `media/`.
-- **Prerrequisito de seguridad antes de guardar CV o documentos firmados
-  en `Attachment`**: `nginx/capital_humano.conf` sirve `/media/` directo,
-  sin pasar por los permisos de Django — hay que arreglarlo antes, no es
-  parte del módulo en sí pero se vuelve urgente con este módulo.
+- ~~**Prerrequisito de seguridad antes de guardar CV o documentos firmados
+  en `Attachment`**: `nginx/capital_humano.conf` sirve `/media/` directo~~
+  — **resuelto (2026-10-01)**: se quitó ese `location` de nginx y se
+  agregó `AttachmentDownloadView` (único camino soportado para bajar un
+  adjunto, mismo permiso que el resto de `Attachment`);
+  `AttachmentSerializer.get_file_url` ya apunta ahí. 4 pruebas nuevas.
 - Las 90 Posición ya vacantes hoy no se les va a inventar firmas ni
   fechas de aprobación — se resuelve con un comando de solo lectura
   (mismo patrón que `reportar_altas_pendientes`) antes de decidir si se

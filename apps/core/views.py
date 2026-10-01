@@ -1,4 +1,5 @@
 from django.contrib.contenttypes.models import ContentType
+from django.http import FileResponse, Http404
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import generics, permissions
@@ -69,3 +70,31 @@ class AttachmentDestroyView(generics.DestroyAPIView):
     # DELETE no usa un serializer para el body, pero drf-spectacular necesita
     # uno para poder generar el schema de esta vista sin marcarla como error.
     serializer_class = AttachmentSerializer
+
+
+@extend_schema(
+    tags=["core"],
+    summary="Descargar archivo adjunto",
+    description=(
+        "Descarga el archivo real pasando por el mismo permiso que el resto "
+        "de Attachment. Es el único camino soportado para bajar un adjunto — "
+        "nunca la ruta directa a /media/, que en producción nginx serviría "
+        "sin revisar ningún permiso (ver AttachmentSerializer.get_file_url)."
+    ),
+)
+class AttachmentDownloadView(generics.RetrieveAPIView):
+    permission_classes = [IsCapitalHumanoOrAdmin]
+    queryset = Attachment.objects.all()
+    # No se usa para serializar la respuesta (esta vista regresa el archivo
+    # crudo) -- drf-spectacular necesita uno igual, mismo motivo que arriba.
+    serializer_class = AttachmentSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        attachment = self.get_object()
+        if not attachment.file:
+            raise Http404
+        return FileResponse(
+            attachment.file.open("rb"),
+            as_attachment=True,
+            filename=attachment.filename or attachment.file.name.rsplit("/", 1)[-1],
+        )

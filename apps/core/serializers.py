@@ -1,5 +1,5 @@
-from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
+from django.urls import reverse
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
@@ -37,6 +37,7 @@ class AttachmentSerializer(serializers.ModelSerializer):
             "document_type_name",
             "uploaded_at", "uploaded_by_username",
         ]
+        extra_kwargs = {"file": {"write_only": True}}
 
     def validate(self, data):
         """Convierte model_name → ContentType FK antes de guardar."""
@@ -52,10 +53,14 @@ class AttachmentSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.URLField(allow_null=True))
     def get_file_url(self, obj):
-        """URL absoluta (incluye dominio) para descarga/visualización directa."""
+        """
+        URL de descarga protegida (pasa por AttachmentDownloadView, mismo
+        permiso que el resto de Attachment) -- NUNCA la ruta directa a
+        /media/, que en producción nginx serviría sin revisar nada.
+        """
         if not obj.file:
             return None
-        path = f"{settings.MEDIA_URL}{obj.file}"
+        path = reverse("attachment-download", kwargs={"pk": obj.pk})
         request = self.context.get("request")
         return request.build_absolute_uri(path) if request else path
 
