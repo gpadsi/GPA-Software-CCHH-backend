@@ -381,3 +381,101 @@ class AprobacionRequisicionAPIRoleTests(RecruitmentTestDataMixin, APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(AprobacionRequisicion.objects.get(pk=response.data["id"]).created_by, self.gestor)
+
+
+class BackfillRequisicionesVacantesTests(RecruitmentTestDataMixin, TestCase):
+    """
+    apps.recruitment.management.commands.backfill_requisiciones_vacantes --
+    confirmado 2026-10-01: a las Posicion ya vacantes no se les inventa
+    justificación, fecha ni tipo -- lo que falta se reporta, no se adivina.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.estatus_pendiente = EstatusPosicion.objects.create(name="Vacante Pendiente de Confirmación")
+        cls.estatus_suspendida = EstatusPosicion.objects.create(name="Vacante Suspendida")
+        cls.estatus_eliminada = EstatusPosicion.objects.create(name="Vacante Eliminada")
+
+    def test_migra_una_vacante_con_tipo_conocido_y_sin_justificacion_requerida(self):
+        posicion = self.create_posicion(
+            estatus=self.estatus_vacante, tipo_requisicion=self.tipo_reemplazo,
+            fecha_registro_vacante=date(2025, 6, 1),
+        )
+        out = StringIO()
+        call_command("backfill_requisiciones_vacantes", stdout=out)
+
+        requisicion = Requisicion.objects.get(posicion=posicion)
+        self.assertEqual(requisicion.tipo, self.tipo_reemplazo)
+        self.assertEqual(requisicion.estado.name, "En Reclutamiento")
+        self.assertEqual(requisicion.fecha_solicitud, date(2025, 6, 1))
+        self.assertIsNone(requisicion.created_by)
+        self.assertIn("Requisición(es) migrada(s): 1", out.getvalue())
+
+    def test_mapea_cada_estatus_vacante_al_estado_de_requisicion_correcto(self):
+        casos = [
+            (self.estatus_vacante, "En Reclutamiento"),
+            (self.estatus_pendiente, "Pendiente de Autorización"),
+            (self.estatus_suspendida, "Suspendida"),
+            (self.estatus_eliminada, "Cancelada"),
+        ]
+        for estatus, estado_esperado in casos:
+            with self.subTest(estatus=estatus.name):
+                posicion = self.create_posicion(
+                    estatus=estatus, tipo_requisicion=self.tipo_reemplazo,
+                    fecha_registro_vacante=date(2025, 6, 1),
+                )
+                call_command("backfill_requisiciones_vacantes", stdout=StringIO())
+                self.assertEqual(Requisicion.objects.get(posicion=posicion).estado.name, estado_esperado)
+
+    def test_omite_una_vacante_sin_tipo_requisicion(self):
+        posicion = self.create_posicion(estatus=self.estatus_vacante, fecha_registro_vacante=date(2025, 6, 1))
+        out = StringIO()
+        call_command("backfill_requisiciones_vacantes", stdout=out)
+
+        self.assertFalse(Requisicion.objects.filter(posicion=posicion).exists())
+        self.assertIn("sin Tipo de requisición capturado", out.getvalue())
+
+    def test_omite_una_vacante_de_tipo_nueva_posicion_porque_falta_la_justificacion(self):
+        posicion = self.create_posicion(
+            estatus=self.estatus_vacante, tipo_requisicion=self.tipo_nueva,
+            fecha_registro_vacante=date(2025, 6, 1),
+        )
+        out = StringIO()
+        call_command("backfill_requisiciones_vacantes", stdout=out)
+
+        self.assertFalse(Requisicion.objects.filter(posicion=posicion).exists())
+        self.assertIn("no pasó validación", out.getvalue())
+
+    def test_omite_una_vacante_sin_fecha_de_registro(self):
+        posicion = self.create_posicion(estatus=self.estatus_vacante, tipo_requisicion=self.tipo_reemplazo)
+        out = StringIO()
+        call_command("backfill_requisiciones_vacantes", stdout=out)
+
+        self.assertFalse(Requisicion.objects.filter(posicion=posicion).exists())
+        self.assertIn("sin fecha de registro de vacante", out.getvalue())
+
+    def test_es_idempotente(self):
+        self.create_posicion(
+            estatus=self.estatus_vacante, tipo_requisicion=self.tipo_reemplazo,
+            fecha_registro_vacante=date(2025, 6, 1),
+        )
+        call_command("backfill_requisiciones_vacantes", stdout=StringIO())
+        self.assertEqual(Requisicion.objects.count(), 1)
+
+        out = StringIO()
+        call_command("backfill_requisiciones_vacantes", stdout=out)
+        self.assertEqual(Requisicion.objects.count(), 1)
+        self.assertIn("Requisición(es) migrada(s): 0", out.getvalue())
+
+    def test_no_toca_una_posicion_que_ya_tiene_una_requisicion(self):
+        posicion = self.create_posicion(
+            estatus=self.estatus_vacante, tipo_requisicion=self.tipo_reemplazo,
+            fecha_registro_vacante=date(2025, 6, 1),
+        )
+        self.create_requisicion(posicion=posicion, tipo=self.tipo_reemplazo, estado=self.estado_borrador)
+
+        call_command("backfill_requisiciones_vacantes", stdout=StringIO())
+
+        self.assertEqual(Requisicion.objects.filter(posicion=posicion).count(), 1)
+        self.assertEqual(Requisicion.objects.get(posicion=posicion).estado, self.estado_borrador)

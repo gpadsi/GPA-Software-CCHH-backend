@@ -303,10 +303,16 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
   agregó `AttachmentDownloadView` (único camino soportado para bajar un
   adjunto, mismo permiso que el resto de `Attachment`);
   `AttachmentSerializer.get_file_url` ya apunta ahí. 4 pruebas nuevas.
-- Las 90 Posición ya vacantes hoy no se les va a inventar firmas ni
-  fechas de aprobación — se resuelve con un comando de solo lectura
-  (mismo patrón que `reportar_altas_pendientes`) antes de decidir si se
-  migran con una Requisición "sin aprobación digital" o se dejan fuera.
+- ~~Las 90 Posición ya vacantes hoy no se les va a inventar firmas ni
+  fechas de aprobación~~ — **resuelto (2026-10-01)**:
+  `backfill_requisiciones_vacantes` migró 39 (las que ya tenían
+  `tipo_requisicion` capturado y no exigían justificación). Las otras 51
+  quedaron reportadas sin tocar — 36 porque la sábana nunca capturó
+  `tipo_requisicion` para esa Posición, 15 porque son "Nueva Posición"
+  (exige justificación) y esa justificación no existe en ningún lado de
+  los datos reales. Esas 51 se quedan sin Requisición hasta que alguien
+  la levante a mano con los datos que sí se sepan; el comando es
+  idempotente, se puede volver a correr cuando GPA complete más datos.
 
 **Orden de entrega acordado:** 1) Requisición completa de punta a punta
 (incluye el export a Excel y el fix de nginx) → 2) Descriptivo de Puesto
