@@ -1,7 +1,10 @@
+from django.http import FileResponse
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
+from rest_framework.decorators import action
 
 from apps.core.permissions import IsCapitalHumanoOrAdmin, IsOwnerOrGestionRRHH, scope_to_own_unless_management
+from apps.recruitment.exports import generar_excel
 from apps.recruitment.models import (
     AprobacionRequisicion,
     EstadoRequisicion,
@@ -71,6 +74,26 @@ class RequisicionViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.deleted_by = self.request.user
         instance.delete()
+
+    @extend_schema(
+        tags=["recruitment"],
+        summary="Exportar a Excel (formato oficial)",
+        description=(
+            "Descarga la Requisición llena en el mismo archivo .xlsx oficial de "
+            "GPA (Requisición o Reemplazo de Personal, según el tipo) -- nunca "
+            "cambia el diseño, solo llena las celdas de respuesta que el "
+            "formulario real ya trae en blanco. Las zonas de firma quedan en "
+            "blanco a propósito, para imprimir y firmar a mano."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="exportar-excel")
+    def exportar_excel(self, request, pk=None):
+        requisicion = self.get_object()
+        nombre_archivo, buffer = generar_excel(requisicion)
+        return FileResponse(
+            buffer, as_attachment=True, filename=nombre_archivo,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 @extend_schema_view(

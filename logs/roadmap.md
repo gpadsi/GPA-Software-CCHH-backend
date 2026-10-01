@@ -278,25 +278,27 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
   `DescriptivoPuesto`.
 - Pendiente de resolver con quien maneja nómina, no se inventa aquí: la
   relación entre sueldo mensual compuesto/bruto/neto de la Requisición.
-- **Exportar con el formato oficial exacto, confirmado para los 3
-  documentos** (2026-10-01): al terminar de capturar una Requisición o un
-  Descriptivo de Puesto en la app, debe poder descargarse como el mismo
-  archivo oficial de GPA (el `.xlsx` de Requisición o Reemplazo según
-  `tipo`, o el `.docx` de Descriptivo de Puesto), lleno, para imprimir —
-  sin rediseñarlo nunca.
-  - Excel (Requisición/Reemplazo): `openpyxl` escribiendo sobre una copia
-    de la plantilla oficial (ya se usa en el proyecto para los imports).
-  - Word (Descriptivo de Puesto): necesita una librería nueva
-    (`python-docx`, hoy no instalada) o manipular el XML directamente
-    (igual que se hizo para leer el archivo en esta conversación). Los
-    checkboxes de competencias (12) y recursos (10) son controles de
-    contenido nativos de Word (`w:sdt`), no casillas de texto simples —
-    hay que resolver cómo marcarlos programáticamente sin romper el
-    documento; se resuelve en la Entrega 2 (cuando se construya
-    `DescriptivoPuesto`), no es parte de la Entrega 1.
-  - Las 3 plantillas oficiales hay que incorporarlas al repo (no quedarse
-    solo en el `Downloads` local) como archivo versionado, no como dato
-    de usuario en `media/`.
+- **Exportar con el formato oficial exacto:**
+  - ~~Excel (Requisición/Reemplazo)~~ — **resuelto (2026-10-01)**:
+    `apps/recruitment/exports.py` llena una copia de la plantilla oficial
+    que corresponda según `tipo`, mapeada celda por celda contra los
+    archivos reales. Modifica solo la hoja y sus estilos dentro del
+    paquete XLSX, para conservar intactos encabezados/pies con imagen y
+    configuración de impresión. Las zonas de firma quedan en blanco a
+    propósito — es para imprimir y firmar a mano, no para simular una
+    firma que no existe. Los campos que no viven en `Requisicion`
+    (nombre de la vacante, unidad de negocio, empresa, puesto y nombre
+    del jefe inmediato) se resuelven desde `Posicion` al momento de
+    exportar, vacíos si falta cualquier eslabón — igual criterio que
+    `Empleado.get_jefe()`. Expuesto en
+    `GET /requisiciones/{id}/exportar-excel/`, mismo permiso que ver la
+    Requisición. Verificado contra una Requisición real migrada.
+  - Word (Descriptivo de Puesto) — **sigue pendiente**, para la Entrega 2
+    (cuando exista `DescriptivoPuesto`): necesita `python-docx` (hoy no
+    instalada) o manipular el XML directo. Los checkboxes de
+    competencias (12) y recursos (10) son controles de contenido nativos
+    de Word (`w:sdt`), no casillas de texto simples — hay que resolver
+    cómo marcarlos sin romper el documento.
 - ~~**Prerrequisito de seguridad antes de guardar CV o documentos firmados
   en `Attachment`**: `nginx/capital_humano.conf` sirve `/media/` directo~~
   — **resuelto (2026-10-01)**: se quitó ese `location` de nginx y se
@@ -314,10 +316,14 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
   la levante a mano con los datos que sí se sepan; el comando es
   idempotente, se puede volver a correr cuando GPA complete más datos.
 
-**Orden de entrega acordado:** 1) Requisición completa de punta a punta
-(incluye el export a Excel y el fix de nginx) → 2) Descriptivo de Puesto
-versionado → 3) Candidatos (opcional, ligero: nombre/contacto/etapa/
-notas/CV vía `Attachment`).
+**Orden de entrega acordado:** 1) ~~Requisición completa de punta a punta
+(incluye el export a Excel y el fix de nginx)~~ — **completa (2026-10-01)**
+→ 2) Descriptivo de Puesto versionado (siguiente) → 3) Candidatos
+(opcional, ligero: nombre/contacto/etapa/notas/CV vía `Attachment`).
+
+Falta solo el frontend: hoy todo esto se usa desde el admin de Django o
+directo contra la API — el placeholder "Reclutamiento" del sidebar sigue
+sin pantallas reales (ver Entrega de frontend, aún no agendada).
 
 **Anotado para después, no ahora:** en el organigrama del frontend, por
 ahora solo mostrar la secuencia (quién reporta a quién), sin desplegar

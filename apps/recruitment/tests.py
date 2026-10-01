@@ -1,6 +1,8 @@
 from datetime import date
 from io import StringIO
+from zipfile import ZipFile
 
+import openpyxl
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
@@ -10,8 +12,11 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.employment.models import Contrato, Empleado
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
-from apps.positions.models import EstatusPosicion, Posicion, TipoRequisicion
+from apps.persons.models import Persona
+from apps.positions.models import EstatusPosicion, Posicion, Puesto, TipoRequisicion
+from apps.recruitment.exports import PLANTILLAS_DIR, generar_excel
 from apps.recruitment.models import (
     AprobacionRequisicion,
     EstadoRequisicion,
@@ -348,6 +353,28 @@ class RequisicionRoleAPITests(RecruitmentTestDataMixin, APITestCase):
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Requisicion.objects.filter(pk=ajena.pk).exists())
 
+    def test_el_dueno_puede_exportar_su_propia_requisicion_a_excel(self):
+        propia = Requisicion.objects.create(
+            posicion=self.create_posicion(), tipo=self.tipo_reemplazo, estado=self.estado_borrador,
+            fecha_solicitud=date(2026, 1, 1), created_by=self.gerente,
+        )
+        self.client.force_authenticate(user=self.gerente)
+        response = self.client.get(reverse("requisicion-exportar-excel", args=[propia.pk]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def test_no_se_puede_exportar_la_requisicion_de_otro_colaborador(self):
+        ajena = Requisicion.objects.create(
+            posicion=self.create_posicion(), tipo=self.tipo_reemplazo, estado=self.estado_borrador,
+            fecha_solicitud=date(2026, 1, 1), created_by=self.otro_colaborador,
+        )
+        self.client.force_authenticate(user=self.gerente)
+        response = self.client.get(reverse("requisicion-exportar-excel", args=[ajena.pk]))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
 
 class AprobacionRequisicionAPIRoleTests(RecruitmentTestDataMixin, APITestCase):
     @classmethod
@@ -479,3 +506,109 @@ class BackfillRequisicionesVacantesTests(RecruitmentTestDataMixin, TestCase):
 
         self.assertEqual(Requisicion.objects.filter(posicion=posicion).count(), 1)
         self.assertEqual(Requisicion.objects.get(posicion=posicion).estado, self.estado_borrador)
+
+
+class GenerarExcelTests(RecruitmentTestDataMixin, TestCase):
+    """
+    apps.recruitment.exports.generar_excel -- llena la plantilla oficial de
+    GPA exacta (confirmado 2026-10-01: mismo archivo, sin rediseñarlo).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.puesto = Puesto.objects.create(name="Auxiliar de Prueba")
+        cls.puesto_jefe = Puesto.objects.create(name="Supervisor de Prueba")
+        unidad_level = OrganizationalLevel.objects.get(code="unidad_negocio")
+        cls.unidad_node = OrganizationNode.objects.create(
+            level=unidad_level, parent=cls.company_node, code="UN-TEST", name="Unidad de prueba",
+        )
+
+    def _crear_jefe_activo(self, posicion_jefe):
+        persona = Persona(first_name="Ana", last_name_paternal="Jefa")
+        persona.full_clean()
+        persona.save()
+        empleado = Empleado(persona=persona)
+        empleado.full_clean()
+        empleado.save()
+        contrato = Contrato(empleado=empleado, posicion=posicion_jefe, fecha_ingreso=date(2020, 1, 1))
+        contrato.full_clean()
+        contrato.save()
+
+    def test_genera_excel_de_reemplazo_con_los_datos_correctos(self):
+        posicion_jefe = self.create_posicion(organization_node=self.unidad_node, puesto=self.puesto_jefe)
+        self._crear_jefe_activo(posicion_jefe)
+        posicion = self.create_posicion(
+            organization_node=self.unidad_node, puesto=self.puesto, reports_to=posicion_jefe,
+        )
+        requisicion = self.create_requisicion(
+            posicion=posicion, tipo=self.tipo_reemplazo, estado=self.estado_borrador,
+            fecha_solicitud=date(2026, 1, 15), area_solicitante="Mantenimiento",
+            horario_a_cubrir=HorarioACubrir.objects.get(name="7:00 - 16:00"),
+            disposicion_viajar=True,
+            tipo_contrato_ofrecido=TipoContratoOfrecido.objects.get(name="Planta"),
+        )
+
+        nombre_archivo, buffer = generar_excel(requisicion)
+
+        self.assertTrue(nombre_archivo.endswith(f"_{requisicion.pk}.xlsx"))
+        self.assertIn("FO-C0-CH-08", nombre_archivo)
+        partes_oficiales = {
+            "xl/drawings/_rels/vmlDrawing1.vml.rels",
+            "xl/drawings/vmlDrawing1.vml",
+            "xl/media/image1.png",
+            "xl/media/image2.png",
+            "xl/media/image3.png",
+            "xl/media/image4.png",
+            "xl/printerSettings/printerSettings1.bin",
+            "xl/worksheets/_rels/sheet1.xml.rels",
+        }
+        with ZipFile(PLANTILLAS_DIR / "FO-C0-CH-08_reemplazo_de_personal_v4.xlsx") as original:
+            contenido_original = {
+                parte: original.read(parte) for parte in partes_oficiales
+            }
+        with ZipFile(buffer) as exportado:
+            self.assertTrue(partes_oficiales.issubset(exportado.namelist()))
+            for parte, contenido in contenido_original.items():
+                self.assertEqual(exportado.read(parte), contenido)
+            hoja_xml = exportado.read("xl/worksheets/sheet1.xml")
+            self.assertIn(b'dimension ref="A1:T45"', hoja_xml)
+            self.assertIn(b'row r="45"', hoja_xml)
+
+        ws = openpyxl.load_workbook(buffer).active
+        self.assertEqual(ws["D1"].value.date(), date(2026, 1, 15))
+        self.assertEqual(ws["D1"].number_format, "dd/mm/yyyy")
+        self.assertEqual(ws["D4"].value, self.puesto.name)
+        self.assertEqual(ws["M4"].value, "Mantenimiento")
+        self.assertEqual(ws["D5"].value, self.unidad_node.name)
+        self.assertEqual(ws["M5"].value, self.company_node.name)
+        self.assertEqual(ws["D6"].value, self.puesto_jefe.name)
+        self.assertEqual(ws["M6"].value, "Jefa  Ana")
+        self.assertEqual(ws["I9"].value, "X")   # horario "7:00 - 16:00"
+        self.assertEqual(ws["O11"].value, "X")  # disposición a viajar: sí
+        self.assertIsNone(ws["Q11"].value)       # limpia el "No" premarcado de la plantilla
+        self.assertEqual(ws["G17"].value, "X")  # tipo de contrato: Planta
+
+    def test_genera_excel_de_nueva_posicion_usa_la_otra_plantilla_con_la_justificacion(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        requisicion = self.create_requisicion(
+            posicion=posicion, tipo=self.tipo_nueva, estado=self.estado_borrador,
+            justificacion="Crecimiento del área.",
+        )
+        nombre_archivo, buffer = generar_excel(requisicion)
+        self.assertIn("FO-C0-CH-01", nombre_archivo)
+        ws = openpyxl.load_workbook(buffer).active
+        self.assertEqual(ws["A9"].value, "Crecimiento del área.")
+
+    def test_campos_sin_dato_real_se_dejan_vacios_no_se_inventan(self):
+        posicion = self.create_posicion()  # sin puesto, sin reports_to
+        requisicion = self.create_requisicion(posicion=posicion)
+
+        _, buffer = generar_excel(requisicion)
+
+        ws = openpyxl.load_workbook(buffer).active
+        self.assertIsNone(ws["D4"].value)  # nombre_vacante: sin Puesto capturado
+        self.assertIsNone(ws["D6"].value)  # puesto_inmediato_superior: sin reports_to
+        self.assertIsNone(ws["M6"].value)  # nombre_jefe_inmediato: sin reports_to
+        self.assertIsNone(ws["O11"].value)  # disposición a viajar: sin dato
+        self.assertIsNone(ws["Q11"].value)  # no conserva el "No" premarcado de la plantilla
