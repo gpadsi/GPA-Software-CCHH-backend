@@ -1,4 +1,5 @@
 from io import StringIO
+from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -11,6 +12,7 @@ from rest_framework.test import APITestCase
 from apps.core.permissions import (
     IsCapitalHumanoOrAdmin,
     IsCapitalHumanoOrAdminOrReadOnly,
+    IsOwnerOrGestionRRHH,
     es_gestion_rrhh,
     scope_to_own_unless_management,
 )
@@ -115,6 +117,43 @@ class RolePermissionUnitTests(TestCase):
 
         request.user = self.capital_humano
         self.assertTrue(permission.has_permission(request, view=None))
+
+    def test_is_owner_or_gestion_rrhh_allows_anyone_authenticated_to_create(self):
+        permission = IsOwnerOrGestionRRHH()
+        request = self.factory.post("/")
+
+        request.user = self.colaborador
+        self.assertTrue(permission.has_permission(request, view=None))
+
+        request.user = self.sin_rol
+        self.assertTrue(permission.has_permission(request, view=None))
+
+    def test_is_owner_or_gestion_rrhh_object_permission_scopes_to_owner(self):
+        permission = IsOwnerOrGestionRRHH()
+        obj = SimpleNamespace(created_by_id=self.colaborador.id)
+        view = SimpleNamespace(action="retrieve")
+        request = self.factory.get("/")
+
+        request.user = self.colaborador
+        self.assertTrue(permission.has_object_permission(request, view, obj))
+
+        request.user = self.sin_rol
+        self.assertFalse(permission.has_object_permission(request, view, obj))
+
+        request.user = self.capital_humano
+        self.assertTrue(permission.has_object_permission(request, view, obj))
+
+    def test_is_owner_or_gestion_rrhh_blocks_destroy_for_the_owner(self):
+        permission = IsOwnerOrGestionRRHH()
+        obj = SimpleNamespace(created_by_id=self.colaborador.id)
+        view = SimpleNamespace(action="destroy")
+        request = self.factory.delete("/")
+
+        request.user = self.colaborador
+        self.assertFalse(permission.has_object_permission(request, view, obj))
+
+        request.user = self.capital_humano
+        self.assertTrue(permission.has_object_permission(request, view, obj))
 
     def test_scope_to_own_unless_management(self):
         persona_uno = Persona.objects.create(first_name="Uno", last_name_paternal="Persona")

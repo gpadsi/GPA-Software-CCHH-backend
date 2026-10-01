@@ -232,8 +232,12 @@ sección de justificación) y `FO-C0-CH-04_Descriptivo_de_puesto`.
 
 **Ya construido (2026-10-01):** app `apps.recruitment` con `Requisicion` +
 `AprobacionRequisicion` + los 4 catálogos nuevos + el flag
-`TipoRequisicion.requiere_justificacion` — ver `logs/dev_log.csv` sesión 8
-para el detalle. 14 pruebas nuevas, 203 en total.
+`TipoRequisicion.requiere_justificacion`; API + permisos (`IsOwnerOrGestionRRHH`,
+nuevo en `apps/core/permissions.py` y reutilizable para futuros módulos
+tipo Permisos/Vacaciones: cualquier autenticado crea y administra lo
+suyo, Capital Humano/Admin administra todo, borrar queda solo para
+ellos). Ver `logs/dev_log.csv` sesión 8 para el detalle. 26 pruebas
+nuevas en total, 215 en el proyecto.
 
 **Reutiliza sin tocar:** `Posicion.tipo_requisicion`/`estatus` (ya traen
 Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,

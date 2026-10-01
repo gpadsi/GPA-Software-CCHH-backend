@@ -51,6 +51,31 @@ class IsCapitalHumanoOrAdminOrReadOnly(permissions.BasePermission):
         return es_gestion_rrhh(user)
 
 
+class IsOwnerOrGestionRRHH(permissions.BasePermission):
+    """
+    Cualquier usuario autenticado puede CREAR (ej. Requisicion: confirmado
+    2026-10-01 que un Gerente/Director puede levantar una, y en este
+    sistema sigue siendo rol "Colaborador" — no existe un rol de gerencia
+    aparte, el filtro real de legitimidad es el flujo de aprobación, no el
+    permiso de creación). Leer/editar su propio registro también se
+    permite a quien lo creó (combínalo con `scope_to_own_unless_management`
+    usando `"created_by"` como owner_lookup en `get_queryset`, igual que ya
+    se hace con "user"/"empleado__user" en otras apps); borrar (incluido el
+    soft-delete) queda reservado a Capital Humano/Admin, igual que el
+    resto del proyecto.
+    """
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        if es_gestion_rrhh(request.user):
+            return True
+        if view.action == "destroy":
+            return False
+        return obj.created_by_id == request.user.id
+
+
 def scope_to_own_unless_management(queryset, user, owner_lookup):
     """
     Capital Humano/Admin ven el queryset completo. Cualquier otro usuario
