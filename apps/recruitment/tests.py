@@ -19,12 +19,22 @@ from apps.positions.models import EstatusPosicion, Posicion, Puesto, TipoRequisi
 from apps.recruitment.exports import PLANTILLAS_DIR, generar_excel
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    CompetenciaConductual,
+    ConformidadDescriptivo,
+    DescriptivoPuesto,
+    DiasPorLaborar,
     EstadoRequisicion,
     EtapaAprobacion,
+    FuncionPuesto,
     HorarioACubrir,
+    IndicadorDesempeno,
+    RangoEdad,
+    RecursoAsignado,
     Requisicion,
+    RolConformidad,
     TipoContratoOfrecido,
 )
+from apps.recruitment.services import copiar_version, crear_borrador
 from apps.users.models import UserRole
 
 
@@ -89,6 +99,14 @@ class SeedRecruitmentCatalogsTests(TestCase):
         self.assertEqual(EtapaAprobacion.objects.count(), 4)
         self.assertEqual(TipoContratoOfrecido.objects.count(), 2)
         self.assertEqual(HorarioACubrir.objects.count(), 5)
+        # Descriptivo de Puesto: valores copiados del Word real.
+        self.assertEqual(RangoEdad.objects.count(), 5)
+        self.assertEqual(DiasPorLaborar.objects.count(), 3)
+        self.assertEqual(CompetenciaConductual.objects.count(), 12)
+        self.assertEqual(RecursoAsignado.objects.count(), 10)
+        self.assertEqual(RolConformidad.objects.count(), 3)
+        self.assertTrue(RolConformidad.objects.get(name="Colaborador").requiere_persona)
+        self.assertFalse(RolConformidad.objects.get(name="Capital Humano").requiere_persona)
 
         out2 = StringIO()
         call_command("seed_recruitment_catalogs", stdout=out2)
@@ -612,3 +630,340 @@ class GenerarExcelTests(RecruitmentTestDataMixin, TestCase):
         self.assertIsNone(ws["M6"].value)  # nombre_jefe_inmediato: sin reports_to
         self.assertIsNone(ws["O11"].value)  # disposición a viajar: sin dato
         self.assertIsNone(ws["Q11"].value)  # no conserva el "No" premarcado de la plantilla
+
+
+class DescriptivoPuestoTestMixin(RecruitmentTestDataMixin):
+    def crear_descriptivo(self, posicion, **kwargs):
+        kwargs.setdefault("fecha_elaboracion", date(2026, 1, 10))
+        descriptivo = DescriptivoPuesto(posicion=posicion, **kwargs)
+        descriptivo.full_clean()
+        descriptivo.save()
+        return descriptivo
+
+    def crear_persona(self, nombre="Luis"):
+        persona = Persona(first_name=nombre, last_name_paternal="Prueba")
+        persona.full_clean()
+        persona.save()
+        return persona
+
+
+class DescriptivoVersionadoTests(DescriptivoPuestoTestMixin, TestCase):
+    def test_la_primera_version_es_la_1_y_cada_copia_suma_una(self):
+        posicion = self.create_posicion()
+        v1 = self.crear_descriptivo(posicion)
+        self.assertEqual(v1.version, 1)
+        v1.congelar()
+        v2 = copiar_version(v1)
+        self.assertEqual(v2.version, 2)
+        v2.congelar()
+        self.assertEqual(copiar_version(v2).version, 3)
+
+    def test_las_versiones_se_numeran_por_posicion(self):
+        otra = self.create_posicion()
+        self.assertEqual(self.crear_descriptivo(self.create_posicion()).version, 1)
+        self.assertEqual(self.crear_descriptivo(otra).version, 1)
+
+    def test_no_se_puede_abrir_un_segundo_borrador_en_la_misma_posicion(self):
+        posicion = self.create_posicion()
+        self.crear_descriptivo(posicion)
+        segundo = DescriptivoPuesto(posicion=posicion, fecha_elaboracion=date(2026, 2, 1))
+        with self.assertRaises(ValidationError) as contexto:
+            segundo.full_clean()
+        self.assertIn("posicion", contexto.exception.message_dict)
+
+    def test_la_base_tambien_impide_dos_borradores_aunque_se_salten_las_validaciones(self):
+        posicion = self.create_posicion()
+        self.crear_descriptivo(posicion)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DescriptivoPuesto.objects.create(posicion=posicion, fecha_elaboracion=date(2026, 2, 1))
+
+    def test_congelar_sella_la_version_y_ya_no_se_puede_modificar(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion(), proposito="Original")
+        descriptivo.congelar()
+        self.assertTrue(descriptivo.esta_congelado)
+
+        # Ni con el mismo objeto, ni con uno recién leído de la base.
+        for objeto in (descriptivo, DescriptivoPuesto.objects.get(pk=descriptivo.pk)):
+            objeto.proposito = "Cambiado"
+            with self.assertRaises(ValidationError):
+                objeto.save()
+            with self.assertRaises(ValidationError):
+                objeto.full_clean()
+        self.assertEqual(DescriptivoPuesto.objects.get(pk=descriptivo.pk).proposito, "Original")
+
+    def test_un_objeto_viejo_en_memoria_no_pasa_por_encima_de_un_congelado_reciente(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion(), proposito="Original")
+        copia_vieja = DescriptivoPuesto.objects.get(pk=descriptivo.pk)  # aún sin congelar en memoria
+        descriptivo.congelar()
+        copia_vieja.proposito = "Cambio tardío"
+        with self.assertRaises(ValidationError):
+            copia_vieja.save()
+
+    def test_no_se_congela_dos_veces(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        descriptivo.congelar()
+        with self.assertRaises(ValidationError):
+            descriptivo.congelar()
+
+    def test_una_version_congelada_no_se_borra_pero_un_borrador_si(self):
+        posicion = self.create_posicion()
+        borrador = self.crear_descriptivo(posicion)
+        borrador.delete()
+        self.assertFalse(DescriptivoPuesto.objects.filter(pk=borrador.pk).exists())
+        self.assertTrue(DescriptivoPuesto.all_objects.filter(pk=borrador.pk, is_deleted=True).exists())
+
+        congelado = self.crear_descriptivo(posicion)
+        congelado.congelar()
+        with self.assertRaises(ValidationError):
+            congelado.delete()
+        self.assertTrue(DescriptivoPuesto.objects.filter(pk=congelado.pk).exists())
+
+    def test_vigente_de_es_la_congelada_mas_reciente_e_ignora_borradores(self):
+        posicion = self.create_posicion()
+        self.assertIsNone(DescriptivoPuesto.vigente_de(posicion))
+        v1 = self.crear_descriptivo(posicion)
+        self.assertIsNone(DescriptivoPuesto.vigente_de(posicion))  # un borrador no es vigente
+        v1.congelar()
+        self.assertEqual(DescriptivoPuesto.vigente_de(posicion), v1)
+        v2 = copiar_version(v1)  # borrador: la vigente sigue siendo v1
+        self.assertEqual(DescriptivoPuesto.vigente_de(posicion), v1)
+        v2.congelar()
+        self.assertEqual(DescriptivoPuesto.vigente_de(posicion), v2)
+
+    def test_congelado_bloquea_funciones_indicadores_y_casillas(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        funcion = FuncionPuesto.objects.create(descriptivo=descriptivo, orden=1, texto="Supervisar")
+        indicador = IndicadorDesempeno.objects.create(descriptivo=descriptivo, orden=1, texto="Meta diaria")
+        descriptivo.competencias.add(CompetenciaConductual.objects.get(name="Liderazgo"))
+        descriptivo.congelar()
+
+        with self.assertRaises(ValidationError):
+            FuncionPuesto.objects.create(descriptivo=descriptivo, orden=2, texto="Otra")
+        funcion.texto = "Cambiada"
+        with self.assertRaises(ValidationError):
+            funcion.save()
+        with self.assertRaises(ValidationError):
+            funcion.delete()
+        with self.assertRaises(ValidationError):
+            IndicadorDesempeno.objects.create(descriptivo=descriptivo, orden=2, texto="Otro")
+        with self.assertRaises(ValidationError):
+            indicador.delete()
+        # Las casillas (M2M) se tocan dentro de un atomic() propio de Django,
+        # sin savepoint: sin este atomic() de la prueba, la excepción dejaría
+        # rota la transacción del TestCase para todo lo que sigue.
+        with self.assertRaises(ValidationError), transaction.atomic():
+            descriptivo.competencias.add(CompetenciaConductual.objects.get(name="Innovación"))
+        with self.assertRaises(ValidationError), transaction.atomic():
+            descriptivo.competencias.clear()
+        with self.assertRaises(ValidationError), transaction.atomic():
+            descriptivo.recursos.set([RecursoAsignado.objects.get(name="Uniforme/EPP")])
+
+        self.assertEqual(descriptivo.funciones.count(), 1)
+        self.assertEqual(descriptivo.indicadores.count(), 1)
+        self.assertEqual(list(descriptivo.competencias.values_list("name", flat=True)), ["Liderazgo"])
+        self.assertEqual(descriptivo.recursos.count(), 0)
+
+    def test_el_borrador_si_se_edita_libremente(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        FuncionPuesto.objects.create(descriptivo=descriptivo, orden=1, texto="Supervisar")
+        descriptivo.recursos.add(RecursoAsignado.objects.get(name="Uniforme/EPP"))
+        descriptivo.proposito = "Nuevo propósito"
+        descriptivo.full_clean()
+        descriptivo.save()
+        self.assertEqual(descriptivo.funciones.count(), 1)
+        self.assertEqual(descriptivo.recursos.count(), 1)
+
+    def test_el_orden_de_funciones_no_se_repite_dentro_de_un_descriptivo(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        FuncionPuesto.objects.create(descriptivo=descriptivo, orden=1, texto="Una")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            FuncionPuesto.objects.create(descriptivo=descriptivo, orden=1, texto="Repetida")
+
+
+class DescriptivoServiciosTests(DescriptivoPuestoTestMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.puesto = Puesto.objects.create(name="Auxiliar de Prueba")
+        cls.puesto_jefe = Puesto.objects.create(name="Supervisor de Prueba")
+
+    def test_crear_borrador_precarga_lo_que_el_sistema_ya_sabe(self):
+        jefe = self.create_posicion(puesto=self.puesto_jefe)
+        posicion = self.create_posicion(puesto=self.puesto, reports_to=jefe)
+
+        descriptivo = crear_borrador(posicion)
+
+        self.assertEqual(descriptivo.version, 1)
+        self.assertFalse(descriptivo.esta_congelado)
+        self.assertEqual(descriptivo.nombre_puesto, "Auxiliar de Prueba")
+        self.assertEqual(descriptivo.empresa, self.company_node.name)
+        self.assertEqual(descriptivo.area_departamento, self.company_node.name)
+        self.assertEqual(descriptivo.reporta_a, "Supervisor de Prueba")
+        self.assertEqual(descriptivo.supervisa_a, "")  # no se precarga: cobertura incompleta de reports_to
+
+    def test_crear_borrador_deja_vacio_lo_que_no_se_sabe_en_vez_de_inventarlo(self):
+        descriptivo = crear_borrador(self.create_posicion())  # sin Puesto ni reports_to
+        self.assertEqual(descriptivo.nombre_puesto, "")
+        self.assertEqual(descriptivo.reporta_a, "")
+
+    def test_crear_borrador_respeta_la_regla_de_un_solo_borrador(self):
+        posicion = self.create_posicion()
+        crear_borrador(posicion)
+        with self.assertRaises(ValidationError):
+            crear_borrador(posicion)
+
+    def test_crear_borrador_registra_quien_lo_creo(self):
+        usuario = get_user_model().objects.create_user(
+            username="redactor", email="redactor@example.com", password="strong-test-password",
+        )
+        descriptivo = crear_borrador(self.create_posicion(), user=usuario)
+        self.assertEqual(descriptivo.created_by, usuario)
+
+    def test_copiar_version_trae_todo_el_contenido_sin_tocar_la_original(self):
+        posicion = self.create_posicion()
+        original = self.crear_descriptivo(
+            posicion, nombre_puesto="Soldador", proposito="Soldar", escolaridad_minima="Secundaria",
+            edad=RangoEdad.objects.get(name="26-35 años"), disponibilidad_viajar=True,
+            dias_por_laborar=DiasPorLaborar.objects.get(name="Lunes a Viernes"),
+            horario=HorarioACubrir.objects.get(name="7:00 - 16:00"), competencias_otras="Puntualidad",
+        )
+        FuncionPuesto.objects.create(descriptivo=original, orden=1, texto="Soldar piezas")
+        FuncionPuesto.objects.create(descriptivo=original, orden=2, texto="Revisar acabados")
+        IndicadorDesempeno.objects.create(descriptivo=original, orden=1, texto="Piezas por turno")
+        original.competencias.add(*CompetenciaConductual.objects.filter(name__in=["Liderazgo", "Integridad"]))
+        original.recursos.add(RecursoAsignado.objects.get(name="Uniforme/EPP"))
+        original.congelar()
+
+        copia = copiar_version(original)
+
+        self.assertNotEqual(copia.pk, original.pk)
+        self.assertEqual(copia.version, 2)
+        self.assertFalse(copia.esta_congelado)  # el borrador nuevo sí se puede editar
+        self.assertEqual(copia.nombre_puesto, "Soldador")
+        self.assertEqual(copia.proposito, "Soldar")
+        self.assertEqual(copia.edad.name, "26-35 años")
+        self.assertIs(copia.disponibilidad_viajar, True)
+        self.assertEqual(copia.horario.name, "7:00 - 16:00")
+        self.assertEqual(copia.competencias_otras, "Puntualidad")
+        self.assertEqual(
+            list(copia.funciones.values_list("orden", "texto")),
+            [(1, "Soldar piezas"), (2, "Revisar acabados")],
+        )
+        self.assertEqual(list(copia.indicadores.values_list("texto", flat=True)), ["Piezas por turno"])
+        self.assertEqual(set(copia.competencias.values_list("name", flat=True)), {"Liderazgo", "Integridad"})
+        self.assertEqual(list(copia.recursos.values_list("name", flat=True)), ["Uniforme/EPP"])
+
+        # Editar la copia no toca la original congelada.
+        copia.proposito = "Soldar y supervisar"
+        copia.full_clean()
+        copia.save()
+        FuncionPuesto.objects.create(descriptivo=copia, orden=3, texto="Capacitar")
+        self.assertEqual(DescriptivoPuesto.objects.get(pk=original.pk).proposito, "Soldar")
+        self.assertEqual(original.funciones.count(), 2)
+
+    def test_copiar_version_no_copia_las_conformidades(self):
+        posicion = self.create_posicion()
+        original = self.crear_descriptivo(posicion)
+        original.congelar()
+        ConformidadDescriptivo.objects.create(
+            descriptivo=original, rol=RolConformidad.objects.get(name="Jefe inmediato"),
+            fecha=date(2026, 2, 1), nombre_manual="Ana Jefa",
+        )
+        copia = copiar_version(original)
+        self.assertEqual(copia.conformidades.count(), 0)
+
+    def test_copiar_version_falla_si_ya_hay_un_borrador_abierto(self):
+        posicion = self.create_posicion()
+        v1 = self.crear_descriptivo(posicion)
+        v1.congelar()
+        copiar_version(v1)
+        with self.assertRaises(ValidationError):
+            copiar_version(v1)
+
+
+class ConformidadDescriptivoTests(DescriptivoPuestoTestMixin, TestCase):
+    def _congelado(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        descriptivo.congelar()
+        return descriptivo
+
+    def _conformidad(self, descriptivo, rol, **kwargs):
+        conformidad = ConformidadDescriptivo(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name=rol), **kwargs,
+        )
+        conformidad.full_clean()
+        conformidad.save()
+        return conformidad
+
+    def test_no_se_da_conformidad_sobre_un_borrador(self):
+        borrador = self.crear_descriptivo(self.create_posicion())
+        conformidad = ConformidadDescriptivo(
+            descriptivo=borrador, rol=RolConformidad.objects.get(name="Jefe inmediato"),
+        )
+        with self.assertRaises(ValidationError) as contexto:
+            conformidad.full_clean()
+        self.assertIn("descriptivo", contexto.exception.message_dict)
+
+    def test_las_conformidades_se_registran_despues_de_congelar_sin_romper_el_congelado(self):
+        descriptivo = self._congelado()
+        self._conformidad(descriptivo, "Jefe inmediato", fecha=date(2026, 3, 1), nombre_manual="Ana Jefa")
+        self._conformidad(descriptivo, "Capital Humano", fecha=date(2026, 3, 2), nombre_manual="Rosa RH")
+        self.assertEqual(descriptivo.conformidades.count(), 2)
+        self.assertTrue(DescriptivoPuesto.objects.get(pk=descriptivo.pk).esta_congelado)
+
+    def test_el_colaborador_exige_una_persona_especifica(self):
+        descriptivo = self._congelado()
+        conformidad = ConformidadDescriptivo(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Colaborador"),
+            fecha=date(2026, 3, 1), nombre_manual="Alguien",
+        )
+        with self.assertRaises(ValidationError) as contexto:
+            conformidad.full_clean()
+        self.assertIn("persona", contexto.exception.message_dict)
+
+    def test_dos_personas_distintas_pueden_dar_su_conformidad_como_colaborador(self):
+        descriptivo = self._congelado()
+        self._conformidad(descriptivo, "Colaborador", persona=self.crear_persona("Luis"), fecha=date(2026, 3, 1))
+        self._conformidad(descriptivo, "Colaborador", persona=self.crear_persona("Mara"), fecha=date(2027, 3, 1))
+        self.assertEqual(descriptivo.conformidades.count(), 2)
+
+    def test_la_misma_persona_no_firma_dos_veces_la_misma_version(self):
+        descriptivo = self._congelado()
+        persona = self.crear_persona()
+        self._conformidad(descriptivo, "Colaborador", persona=persona, fecha=date(2026, 3, 1))
+        repetida = ConformidadDescriptivo(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Colaborador"), persona=persona,
+        )
+        with self.assertRaises(ValidationError):
+            repetida.full_clean()
+
+    def test_un_rol_sin_persona_se_registra_una_sola_vez_por_version(self):
+        descriptivo = self._congelado()
+        self._conformidad(descriptivo, "Jefe inmediato", fecha=date(2026, 3, 1), nombre_manual="Ana")
+        repetida = ConformidadDescriptivo(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Jefe inmediato"),
+        )
+        with self.assertRaises(ValidationError):
+            repetida.full_clean()
+
+    def test_con_fecha_debe_decir_quien_dio_la_conformidad(self):
+        descriptivo = self._congelado()
+        conformidad = ConformidadDescriptivo(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Capital Humano"), fecha=date(2026, 3, 1),
+        )
+        with self.assertRaises(ValidationError) as contexto:
+            conformidad.full_clean()
+        self.assertIn("nombre_manual", contexto.exception.message_dict)
+
+    def test_sin_fecha_queda_pendiente_sin_exigir_quien(self):
+        descriptivo = self._congelado()
+        pendiente = self._conformidad(descriptivo, "Capital Humano")
+        self.assertIsNone(pendiente.fecha)
+
+    def test_conformidad_aceptada_dentro_del_sistema_usa_usuario(self):
+        descriptivo = self._congelado()
+        usuario = get_user_model().objects.create_user(
+            username="jefe-sistema", email="jefe-sistema@example.com", password="strong-test-password",
+        )
+        conformidad = self._conformidad(descriptivo, "Jefe inmediato", fecha=date(2026, 3, 1), usuario=usuario)
+        self.assertEqual(conformidad.usuario, usuario)

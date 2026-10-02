@@ -239,6 +239,15 @@ suyo, Capital Humano/Admin administra todo, borrar queda solo para
 ellos). Ver `logs/dev_log.csv` sesión 8 para el detalle. 26 pruebas
 nuevas en total, 215 en el proyecto.
 
+**Entrega 2 en curso (2026-10-02):** 2.1 modelos listos — `DescriptivoPuesto`
+versionado (borrador editable → congelado inmutable; una sola versión
+borrador por Posición; `vigente_de(posicion)`), `FuncionPuesto`,
+`IndicadorDesempeno` (sin tope de filas, el formulario trae 5 y 3),
+`ConformidadDescriptivo` (híbrida usuario/nombre a mano, solo sobre versión
+congelada, ligada a la Persona cuando el rol lo exige) y 5 catálogos nuevos
+sembrados del Word real. `services.crear_borrador` / `copiar_version`.
+Falta 2.2 (API y permisos) y 2.3 (export a Word). 259 pruebas en el proyecto.
+
 **Reutiliza sin tocar:** `Posicion.tipo_requisicion`/`estatus` (ya traen
 Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
 `solicitante_vacante`, fechas de registro/autorización de vacante,
@@ -318,7 +327,8 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
 
 **Orden de entrega acordado:** 1) ~~Requisición completa de punta a punta
 (incluye el export a Excel y el fix de nginx)~~ — **completa (2026-10-01)**
-→ 2) Descriptivo de Puesto versionado (siguiente) → 3) Candidatos
+→ 2) Descriptivo de Puesto versionado (**en curso**: 2.1 modelos hechos, falta
+2.2 API/permisos y 2.3 export a Word) → 3) Candidatos
 (opcional, ligero: nombre/contacto/etapa/notas/CV vía `Attachment`).
 
 Falta solo el frontend: hoy todo esto se usa desde el admin de Django o
