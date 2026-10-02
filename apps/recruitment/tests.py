@@ -1,5 +1,8 @@
+import io
 from datetime import date
 from io import StringIO
+from unittest import mock
+from xml.dom import minidom
 from zipfile import ZipFile
 
 import openpyxl
@@ -16,7 +19,9 @@ from apps.employment.models import Contrato, Empleado
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.persons.models import Persona
 from apps.positions.models import EstatusPosicion, Posicion, Puesto, TipoRequisicion
+from apps.recruitment import exports_word
 from apps.recruitment.exports import PLANTILLAS_DIR, generar_excel
+from apps.recruitment.exports_word import PLANTILLA as PLANTILLA_WORD, _ancestro, _texto_de, generar_word
 from apps.recruitment.models import (
     AprobacionRequisicion,
     CompetenciaConductual,
@@ -788,6 +793,244 @@ class DescriptivoVersionadoTests(DescriptivoPuestoTestMixin, TestCase):
             FuncionPuesto.objects.create(descriptivo=descriptivo, orden=1, texto="Repetida")
 
 
+def _abrir_word(buffer):
+    with ZipFile(buffer) as paquete:
+        return minidom.parseString(paquete.read("word/document.xml"))
+
+
+def _plantilla_word():
+    with ZipFile(PLANTILLA_WORD) as paquete:
+        return minidom.parseString(paquete.read("word/document.xml"))
+
+
+def _casillas_marcadas(documento):
+    marcadas = set()
+    for indice, sdt in enumerate(documento.getElementsByTagName("w:sdt")):
+        for casilla in sdt.getElementsByTagName("w14:checked"):
+            if casilla.getAttribute("w14:val") == "1":
+                marcadas.add(indice)
+    return marcadas
+
+
+def _controles_cambiados(documento):
+    """Posicion de los controles que ya no son iguales a los de la plantilla oficial."""
+    base = list(_plantilla_word().getElementsByTagName("w:sdt"))
+    nuevos = list(documento.getElementsByTagName("w:sdt"))
+    assert len(base) == len(nuevos), "se agregaron o quitaron controles"
+    return {i for i, (a, b) in enumerate(zip(base, nuevos)) if a.toxml() != b.toxml()}
+
+
+class GenerarWordTests(DescriptivoPuestoTestMixin, TestCase):
+    """
+    apps.recruitment.exports_word.generar_word -- llena el Descriptivo oficial
+    de GPA (FO-C0-CH-04) sin rediseñarlo. La prueba central: solo cambian los
+    controles que tienen dato; todo lo demás queda igual a la plantilla.
+    """
+
+    def _descriptivo(self, **kwargs):
+        return self.crear_descriptivo(self.create_posicion(), **kwargs)
+
+    def test_conserva_intacto_todo_el_paquete_salvo_el_documento(self):
+        nombre_archivo, buffer = generar_word(self._descriptivo(nombre_puesto="Soldador"))
+
+        self.assertIn("FO-C0-CH-04", nombre_archivo)
+        self.assertTrue(nombre_archivo.endswith(".docx"))
+        with ZipFile(PLANTILLA_WORD) as original, ZipFile(buffer) as exportado:
+            self.assertEqual(original.namelist(), exportado.namelist())
+            for parte in original.namelist():
+                if parte == "word/document.xml":
+                    continue
+                self.assertEqual(exportado.read(parte), original.read(parte), parte)
+            self.assertIn("word/media/image1.png", exportado.namelist())  # imagenes del encabezado
+            self.assertIn("word/glossary/document.xml", exportado.namelist())  # textos guia
+
+    def test_un_descriptivo_vacio_solo_cambia_la_fecha_y_no_marca_nada(self):
+        _, buffer = generar_word(self._descriptivo())
+        documento = _abrir_word(buffer)
+        self.assertEqual(_controles_cambiados(documento), {5})
+        self.assertEqual(_casillas_marcadas(documento), set())
+
+    def test_llena_textos_y_fecha_y_deja_igual_todo_lo_demas(self):
+        _, buffer = generar_word(self._descriptivo(
+            nombre_puesto="Soldador", empresa="GPA Advanced Manufacturing", area_departamento="Mass Production",
+            reporta_a="Supervisor", proposito="Soldar estructuras", decisiones_operativas="Asignar turnos",
+            relaciones_externas="Proveedores", escolaridad_minima="Secundaria",
+            fecha_elaboracion=date(2026, 1, 10),
+        ))
+        documento = _abrir_word(buffer)
+        controles = list(documento.getElementsByTagName("w:sdt"))
+
+        # Solo cambian los controles con dato (supervisa_a quedo vacio -> intacto).
+        self.assertEqual(_controles_cambiados(documento), {0, 1, 2, 3, 5, 21, 28, 32, 33})
+        self.assertEqual(_texto_de(controles[0]), "Soldador")
+        self.assertEqual(_texto_de(controles[21]), "Soldar estructuras")
+        self.assertEqual(_texto_de(controles[5]), "10 de enero de 2026")
+        self.assertEqual(
+            controles[5].getElementsByTagName("w:date")[0].getAttribute("w:fullDate"), "2026-01-10T00:00:00Z",
+        )
+        for indice in (0, 1, 2, 3, 5, 21, 28, 32, 33):
+            self.assertFalse(controles[indice].getElementsByTagName("w:showingPlcHdr"), indice)
+        for indice in (4, 27, 29, 49):  # sin dato, o texto del formato: se quedan con su texto guia
+            self.assertEqual(
+                controles[indice].toxml(),
+                list(_plantilla_word().getElementsByTagName("w:sdt"))[indice].toxml(),
+            )
+        # Escrito con el estilo "Cuerpo" de la plantilla, no con la cursiva gris del texto guia.
+        run = controles[0].getElementsByTagName("w:r")[0]
+        self.assertEqual(run.getElementsByTagName("w:rStyle")[0].getAttribute("w:val"), "Cuerpo")
+        self.assertFalse(run.getElementsByTagName("w:i"))
+        self.assertFalse(run.getElementsByTagName("w:color"))
+
+    def test_marca_exactamente_las_casillas_que_corresponden(self):
+        descriptivo = self._descriptivo(
+            edad=RangoEdad.objects.get(name="26-35 años"), disponibilidad_viajar=True,
+            dias_por_laborar=DiasPorLaborar.objects.get(name="Lunes a Viernes"),
+            horario=HorarioACubrir.objects.get(name="7:00 - 16:00"),
+        )
+        descriptivo.competencias.add(*CompetenciaConductual.objects.filter(name__in=["Liderazgo", "Integridad"]))
+        descriptivo.recursos.add(*RecursoAsignado.objects.filter(
+            name__in=["Uniforme/EPP", "Vehículo asignado", "Fondo fijo o caja chica asignada (para manejo de efectivo)"],
+        ))
+
+        _, buffer = generar_word(descriptivo)
+        documento = _abrir_word(buffer)
+
+        # 7 edad 26-35 | 11 viajar SI | 13 Lunes a Viernes | 17 07:00-16:00
+        # 43 Liderazgo, 37 Integridad | 59 Uniforme/EPP, 51 Vehiculo, 57 Fondo fijo
+        self.assertEqual(_casillas_marcadas(documento), {7, 11, 13, 17, 43, 37, 59, 51, 57})
+        self.assertEqual(_controles_cambiados(documento), {5, 7, 11, 13, 17, 43, 37, 59, 51, 57})
+        marcada = list(documento.getElementsByTagName("w:sdt"))[7]
+        self.assertEqual(_texto_de(marcada), "☒")
+        simbolo = marcada.getElementsByTagName("w:sdtContent")[0]  # no las propiedades del control (esas son Arial)
+        fuentes = simbolo.getElementsByTagName("w:rFonts")[0]
+        self.assertEqual(fuentes.getAttribute("w:ascii"), "MS Gothic")  # la fuente del estado "marcado"
+        self.assertEqual(fuentes.getAttribute("w:eastAsia"), "MS Gothic")
+        self.assertFalse(fuentes.hasAttribute("w:cs"))
+
+    def test_viajar_no_marca_si_no_hay_dato_y_marca_no_cuando_es_falso(self):
+        _, sin_dato = generar_word(self._descriptivo())
+        self.assertEqual(_casillas_marcadas(_abrir_word(sin_dato)), set())
+        _, con_no = generar_word(self._descriptivo(disponibilidad_viajar=False))
+        self.assertEqual(_casillas_marcadas(_abrir_word(con_no)), {12})
+
+    def test_renglones_otro_se_llenan_subrayados_y_los_demas_conservan_su_linea(self):
+        descriptivo = self._descriptivo(
+            edad=RangoEdad.objects.get(name="Otro"), edad_otro="52 años",
+            horario=HorarioACubrir.objects.get(name="Otro"), horario_otro="Turno rolado",
+            competencias_otras="Puntualidad", recursos_otro="Radio de comunicación",
+        )
+        _, buffer = generar_word(descriptivo)
+        documento = _abrir_word(buffer)
+        controles = list(documento.getElementsByTagName("w:sdt"))
+
+        edad = _texto_de(_ancestro(controles[10], "w:p"))
+        self.assertIn("Otro: 52 años", edad)
+        self.assertNotIn("_", edad)
+        self.assertTrue(_ancestro(controles[10], "w:p").getElementsByTagName("w:u"))  # el valor va subrayado
+        self.assertIn("Otro: Turno rolado", _texto_de(_ancestro(controles[20], "w:p")))
+        self.assertIn("____", _texto_de(_ancestro(controles[15], "w:p")))  # dias "Otro": sin dato, conserva su linea
+        otras = [p for p in documento.getElementsByTagName("w:p") if _texto_de(p).startswith("Otras:")]
+        self.assertEqual([_texto_de(p) for p in otras], ["Otras: Puntualidad"])
+        fila_uniforme = _ancestro(controles[59], "w:tr")
+        self.assertIn("Otro: Radio de comunicación", _texto_de(fila_uniforme))
+        self.assertNotIn("_", _texto_de(fila_uniforme))
+        self.assertEqual(_casillas_marcadas(documento), {10, 20})
+
+    def test_funciones_e_indicadores_van_en_su_fila_numerada(self):
+        descriptivo = self._descriptivo()
+        for numero in (1, 2):
+            FuncionPuesto.objects.create(descriptivo=descriptivo, orden=numero, texto=f"Función {numero}")
+        IndicadorDesempeno.objects.create(descriptivo=descriptivo, orden=1, texto="Piezas por turno")
+
+        _, buffer = generar_word(descriptivo)
+        documento = _abrir_word(buffer)
+        controles = list(documento.getElementsByTagName("w:sdt"))
+
+        self.assertEqual(_controles_cambiados(documento), {5, 22, 23, 60})
+        self.assertEqual(_texto_de(controles[22]), "Función 1")
+        self.assertEqual(_texto_de(controles[23]), "Función 2")
+        self.assertEqual(_texto_de(controles[60]), "Piezas por turno")
+        # Las filas sin dato (3 a 5) conservan el texto guia de la plantilla.
+        self.assertTrue(controles[24].getElementsByTagName("w:showingPlcHdr"))
+
+    def test_mas_filas_de_las_que_trae_el_formulario_clona_la_ultima(self):
+        descriptivo = self._descriptivo()
+        for numero in range(1, 8):
+            FuncionPuesto.objects.create(descriptivo=descriptivo, orden=numero, texto=f"Función {numero}")
+        for numero in range(1, 5):
+            IndicadorDesempeno.objects.create(descriptivo=descriptivo, orden=numero, texto=f"Indicador texto {numero}")
+
+        _, buffer = generar_word(descriptivo)
+        documento = _abrir_word(buffer)
+
+        self.assertEqual(len(documento.getElementsByTagName("w:sdt")), 63 + 2 + 1)
+        filas = [tr for tr in documento.getElementsByTagName("w:tr")]
+        responsabilidades = [_texto_de(tr) for tr in filas if _texto_de(tr).startswith("Responsabilidad ")]
+        self.assertEqual(
+            responsabilidades, [f"Responsabilidad {n}Función {n}" for n in range(1, 8)],
+        )
+        indicadores = [_texto_de(tr) for tr in filas if _texto_de(tr).startswith("Indicador ")]
+        self.assertEqual(indicadores, [f"Indicador {n}Indicador texto {n}" for n in range(1, 5)])
+        # Cada control nuevo trae su propio id y los parrafos clonados no repiten paraId.
+        ids = [e.getAttribute("w:val") for e in documento.getElementsByTagName("w:id") if e.parentNode.tagName == "w:sdtPr"]
+        self.assertEqual(len(ids), len(set(ids)))
+        para_ids = [e.getAttribute("w14:paraId") for e in documento.getElementsByTagName("*") if e.hasAttribute("w14:paraId")]
+        self.assertEqual(len(para_ids), len(set(para_ids)))
+        # Las filas clonadas quedan justo despues de la ultima original, no al final del documento.
+        self.assertEqual(_texto_de(filas[[i for i, tr in enumerate(filas) if _texto_de(tr).startswith("Responsabilidad 5")][0] + 1])[:16], "Responsabilidad ")
+
+    def test_caracteres_especiales_y_saltos_de_linea_no_rompen_el_documento(self):
+        _, buffer = generar_word(self._descriptivo(proposito="Tom & Jerry <b>\"ñandú\"</b>\nSegunda línea\r\nTercera\x07"))
+        documento = _abrir_word(buffer)  # si no fuera XML valido, esto falla
+        control = list(documento.getElementsByTagName("w:sdt"))[21]
+        self.assertEqual(_texto_de(control), "Tom & Jerry <b>\"ñandú\"</b>Segunda líneaTercera")
+        # Un parrafo por linea (con el mismo formato) y SIN saltos manuales: en una
+        # celda justificada, Word estira hasta el margen la linea que termina en w:br.
+        parrafos = control.getElementsByTagName("w:p")
+        self.assertEqual([_texto_de(p) for p in parrafos], ["Tom & Jerry <b>\"ñandú\"</b>", "Segunda línea", "Tercera"])
+        self.assertFalse(control.getElementsByTagName("w:br"))
+        self.assertEqual(len({p.getElementsByTagName("w:jc")[0].getAttribute("w:val") for p in parrafos}), 1)
+
+    def test_el_valor_de_un_renglon_otro_es_de_una_sola_linea(self):
+        _, buffer = generar_word(self._descriptivo(
+            edad=RangoEdad.objects.get(name="Otro"), edad_otro="52 años\ny medio",
+        ))
+        controles = list(_abrir_word(buffer).getElementsByTagName("w:sdt"))
+        self.assertIn("Otro: 52 años y medio", _texto_de(_ancestro(controles[10], "w:p")))
+
+    def test_las_firmas_no_se_tocan_aunque_haya_conformidades(self):
+        descriptivo = self._descriptivo(nombre_puesto="Soldador")
+        descriptivo.congelar()
+        ConformidadDescriptivo.objects.create(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Jefe inmediato"),
+            fecha=date(2026, 3, 1), nombre_manual="Ana Jefa",
+        )
+        _, buffer = generar_word(descriptivo)
+        filas_nuevas = list(_abrir_word(buffer).getElementsByTagName("w:tr"))[-3:]
+        filas_plantilla = list(_plantilla_word().getElementsByTagName("w:tr"))[-3:]
+        self.assertEqual([f.toxml() for f in filas_nuevas], [f.toxml() for f in filas_plantilla])
+        self.assertNotIn("Ana Jefa", "".join(_texto_de(f) for f in filas_nuevas))
+
+    def test_los_codigos_sembrados_coinciden_con_los_del_mapa(self):
+        for modelo, mapa in (
+            (RangoEdad, exports_word._EDAD), (DiasPorLaborar, exports_word._DIAS),
+            (HorarioACubrir, exports_word._HORARIO), (CompetenciaConductual, exports_word._COMPETENCIAS),
+            (RecursoAsignado, exports_word._RECURSOS),
+        ):
+            with self.subTest(modelo=modelo.__name__):
+                self.assertEqual(set(modelo.objects.values_list("code", flat=True)), set(mapa))
+
+    def test_si_la_plantilla_cambia_falla_con_un_mensaje_claro_en_vez_de_escribir_en_otro_campo(self):
+        descriptivo = self._descriptivo(empresa="GPA")
+        with mock.patch.dict(exports_word._TEXTOS, {"empresa": (1, "Una etiqueta que ya no existe")}):
+            with self.assertRaises(RuntimeError) as contexto:
+                generar_word(descriptivo)
+        self.assertIn("La plantilla del Descriptivo cambió", str(contexto.exception))
+        with mock.patch.object(exports_word, "_TOTAL_CONTROLES", 62):
+            with self.assertRaises(RuntimeError):
+                generar_word(descriptivo)
+
+
 class DescriptivoServiciosTests(DescriptivoPuestoTestMixin, TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -1263,6 +1506,34 @@ class DescriptivoPuestoAPITests(DescriptivoPuestoTestMixin, APITestCase):
         conformidades = self.client.get(url).data["conformidades"]
         self.assertEqual(len(conformidades), 1)
         self.assertEqual(conformidades[0]["nombre_manual"], "Ana Jefa")
+
+    def test_cualquier_autenticado_puede_exportar_a_word_un_borrador_o_una_version(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion(), nombre_puesto="Soldador")
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-exportar-word", args=[descriptivo.pk])
+
+        borrador = self.client.get(url)
+        self.assertEqual(borrador.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            borrador["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertIn("attachment", borrador["Content-Disposition"])
+        self.assertIn("FO-C0-CH-04", borrador["Content-Disposition"])
+        contenido = b"".join(borrador.streaming_content)
+        with ZipFile(io.BytesIO(contenido)) as paquete:
+            self.assertIn("Soldador", paquete.read("word/document.xml").decode("utf-8"))
+
+        descriptivo.congelar()
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+
+    def test_exportar_a_word_exige_autenticacion_y_un_descriptivo_que_exista(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        url = reverse("descriptivopuesto-exportar-word", args=[descriptivo.pk])
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.force_authenticate(user=self.colaborador)
+        inexistente = reverse("descriptivopuesto-exportar-word", args=["00000000-0000-0000-0000-000000000000"])
+        self.assertEqual(self.client.get(inexistente).status_code, status.HTTP_404_NOT_FOUND)
 
 
 class ConformidadDescriptivoAPITests(DescriptivoPuestoTestMixin, APITestCase):

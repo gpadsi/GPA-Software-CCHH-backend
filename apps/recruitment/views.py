@@ -15,6 +15,7 @@ from apps.core.permissions import (
 )
 from apps.positions.models import Posicion
 from apps.recruitment.exports import generar_excel
+from apps.recruitment.exports_word import generar_word
 from apps.recruitment.models import (
     AprobacionRequisicion,
     CompetenciaConductual,
@@ -254,6 +255,25 @@ class DescriptivoPuestoViewSet(viewsets.ModelViewSet):
         except DjangoValidationError as error:
             _raise_drf_validation_error(error)
         return Response(self._serializar(descriptivo))
+
+    @extend_schema(
+        tags=["recruitment"],
+        summary="Exportar a Word (formato oficial)",
+        description=(
+            "Descarga el Descriptivo (borrador o versión congelada) en el mismo "
+            "archivo .docx oficial de GPA (FO-C0-CH-04) -- nunca cambia el diseño, "
+            "solo llena los campos y casillas que el formulario ya trae. Lo que no "
+            "tiene dato queda como la plantilla; las firmas quedan en blanco a "
+            "propósito, para imprimir y firmar a mano."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="exportar-word")
+    def exportar_word(self, request, pk=None):
+        nombre_archivo, buffer = generar_word(self.get_object())
+        return FileResponse(
+            buffer, as_attachment=True, filename=nombre_archivo,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
 
     @extend_schema(
         tags=["recruitment"],

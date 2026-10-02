@@ -239,8 +239,8 @@ suyo, Capital Humano/Admin administra todo, borrar queda solo para
 ellos). Ver `logs/dev_log.csv` sesión 8 para el detalle. 26 pruebas
 nuevas en total, 215 en el proyecto.
 
-**Entrega 2 en curso (2026-10-02):** 2.1 modelos y 2.2 API/permisos listos
-(el detalle de 2.2 está al final de este párrafo); falta 2.3 (export a Word).
+**Entrega 2 completa (2026-10-02):** 2.1 modelos, 2.2 API/permisos y 2.3
+export a Word (el detalle de cada una está en este párrafo).
 2.1 — `DescriptivoPuesto`
 versionado (borrador editable → congelado inmutable; una sola versión
 borrador por Posición; `vigente_de(posicion)`), `FuncionPuesto`,
@@ -259,7 +259,29 @@ adelante se quiere que cada quien vea solo el Descriptivo de su propia
 Posición, es un cambio chico en el queryset. El Colaborador todavía no
 puede "aceptar" desde su cuenta (hoy es solo lectura en todo el sistema).
 Funciones/indicadores/casillas se editan en una sola llamada con listas
-completas que reemplazan a las anteriores. 284 pruebas en el proyecto.
+completas que reemplazan a las anteriores.
+2.3 — export a Word: `GET /descriptivos/{id}/exportar-word/` (mismo permiso
+que leer; sirve para un borrador o una versión congelada) →
+`apps/recruitment/exports_word.py` llena el `.docx` oficial (FO-C0-CH-04)
+editando solo `word/document.xml` dentro del paquete, sin `python-docx` ni
+dependencias nuevas; encabezado, pie, estilos y glosario quedan idénticos a
+la plantilla. Los 63 controles de contenido de Word se localizan por
+posición y cada entrada del mapa trae la etiqueta que debe tener al lado,
+que se verifica al exportar: si alguien cambia la plantilla, falla con un
+mensaje claro en vez de escribir en el campo equivocado. Casillas marcadas
+como lo hace Word (☒, fuente MS Gothic, `w14:checked=1`); texto escrito con
+el estilo `Cuerpo` de la plantilla (no la cursiva gris del texto guía);
+renglones "Otro: ____" reemplazados por el valor subrayado; fecha con su
+`fullDate`; más de 5 funciones o 3 indicadores clonan la última fila.
+Reglas (iguales a las del Excel): lo que no tiene dato se queda como la
+plantilla (texto guía gris incluido), las firmas quedan en blanco y los
+textos del formato ("Funciones y responsabilidades institucionales" y la
+indicación de Recursos necesarios) no se tocan. Verificado abriendo el
+resultado en Microsoft Word y renderizándolo a PDF. **Decisión abierta:**
+una fila sin dato conserva su texto guía, y las responsabilidades 2 y 3 lo
+traen como ejemplos ("Ejemplo de redacción correcta/incorrecta") que se
+imprimirían; si se prefiere dejar en blanco las filas sin dato, es un
+cambio chico. 299 pruebas en el proyecto.
 
 **Reutiliza sin tocar:** `Posicion.tipo_requisicion`/`estatus` (ya traen
 Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
@@ -315,12 +337,10 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
     `Empleado.get_jefe()`. Expuesto en
     `GET /requisiciones/{id}/exportar-excel/`, mismo permiso que ver la
     Requisición. Verificado contra una Requisición real migrada.
-  - Word (Descriptivo de Puesto) — **sigue pendiente**, para la Entrega 2
-    (cuando exista `DescriptivoPuesto`): necesita `python-docx` (hoy no
-    instalada) o manipular el XML directo. Los checkboxes de
-    competencias (12) y recursos (10) son controles de contenido nativos
-    de Word (`w:sdt`), no casillas de texto simples — hay que resolver
-    cómo marcarlos sin romper el documento.
+  - ~~Word (Descriptivo de Puesto)~~ — **resuelto (2026-10-02)**: se
+    manipula el XML directo (sin `python-docx`); las casillas y campos son
+    controles de contenido de Word (`w:sdt`) y se llenan como lo hace
+    Word. Ver el punto 2.3 de arriba.
 - ~~**Prerrequisito de seguridad antes de guardar CV o documentos firmados
   en `Attachment`**: `nginx/capital_humano.conf` sirve `/media/` directo~~
   — **resuelto (2026-10-01)**: se quitó ese `location` de nginx y se
@@ -340,8 +360,8 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
 
 **Orden de entrega acordado:** 1) ~~Requisición completa de punta a punta
 (incluye el export a Excel y el fix de nginx)~~ — **completa (2026-10-01)**
-→ 2) Descriptivo de Puesto versionado (**en curso**: 2.1 modelos y 2.2
-API/permisos hechos, falta 2.3 export a Word) → 3) Candidatos
+→ 2) ~~Descriptivo de Puesto versionado~~ — **completa (2026-10-02)**
+(modelos, API/permisos y export a Word) → 3) Candidatos
 (opcional, ligero: nombre/contacto/etapa/notas/CV vía `Attachment`).
 
 Falta solo el frontend: hoy todo esto se usa desde el admin de Django o
