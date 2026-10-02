@@ -1,13 +1,26 @@
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
+from apps.core.permissions import es_gestion_rrhh
+from apps.persons.models import Persona
+from apps.positions.models import Posicion
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    CompetenciaConductual,
+    ConformidadDescriptivo,
+    DescriptivoPuesto,
+    DiasPorLaborar,
     EstadoRequisicion,
     EtapaAprobacion,
+    FuncionPuesto,
     HorarioACubrir,
+    IndicadorDesempeno,
+    RangoEdad,
+    RecursoAsignado,
     Requisicion,
+    RolConformidad,
     TipoContratoOfrecido,
 )
 
@@ -92,3 +105,180 @@ class RequisicionSerializer(FullCleanModelSerializer):
             "aprobaciones",
         ]
         read_only_fields = ["id"]
+
+
+# ---------------------------------------------------------------------------
+# Descriptivo de Puesto
+# ---------------------------------------------------------------------------
+
+class RangoEdadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RangoEdad
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = fields
+
+
+class DiasPorLaborarSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DiasPorLaborar
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = fields
+
+
+class CompetenciaConductualSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CompetenciaConductual
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = fields
+
+
+class RecursoAsignadoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecursoAsignado
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = fields
+
+
+class RolConformidadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RolConformidad
+        fields = ["id", "code", "name", "is_active", "requiere_persona"]
+        read_only_fields = fields
+
+
+class FuncionPuestoSerializer(serializers.ModelSerializer):
+    # El número lo da la posición en la lista que manda el cliente (1, 2,
+    # 3...): así nunca hay huecos ni repetidos que validar.
+    class Meta:
+        model = FuncionPuesto
+        fields = ["orden", "texto"]
+        read_only_fields = ["orden"]
+
+
+class IndicadorDesempenoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IndicadorDesempeno
+        fields = ["orden", "texto"]
+        read_only_fields = ["orden"]
+
+
+class ConformidadDescriptivoSerializer(FullCleanModelSerializer):
+    # Declarado a mano a propósito: DRF vuelve obligatorio (required=True) todo
+    # campo que aparece en una UniqueConstraint, y aquí `persona` es opcional
+    # (solo el rol Colaborador la exige, y eso lo valida el modelo).
+    persona = serializers.PrimaryKeyRelatedField(queryset=Persona.objects.all(), required=False, allow_null=True)
+
+    class Meta:
+        model = ConformidadDescriptivo
+        fields = ["id", "descriptivo", "rol", "persona", "fecha", "usuario", "nombre_manual"]
+        read_only_fields = ["id"]
+        # DRF arma un UniqueTogetherValidator por cada UniqueConstraint
+        # IGNORANDO su condición: el de (descriptivo, rol) bloquearía que dos
+        # personas distintas den su conformidad como Colaborador sobre la
+        # misma versión. full_clean() del modelo sí respeta la condición
+        # (persona nula / no borrado) y devuelve el mismo error, así que la
+        # unicidad se valida ahí.
+        validators = []
+
+    def validate(self, attrs):
+        # Una conformidad pertenece a UNA versión: moverla a otra
+        # desvirtuaría "firmó esta versión".
+        if self.instance and "descriptivo" in attrs and attrs["descriptivo"].pk != self.instance.descriptivo_id:
+            raise serializers.ValidationError({"descriptivo": "No se puede mover una conformidad a otra versión."})
+        return attrs
+
+
+class DescriptivoPuestoSerializer(FullCleanModelSerializer):
+    """
+    Funciones e indicadores se mandan como lista completa (`[{"texto": ...}]`)
+    y REEMPLAZAN la anterior; omitir la clave los deja como están. Las
+    casillas (competencias/recursos) son listas de ids de catálogo con la
+    misma regla. Todo esto solo aplica a un borrador: contra una versión
+    congelada la validación del modelo lo rechaza ANTES de tocar nada.
+    """
+    funciones = FuncionPuestoSerializer(many=True, required=False)
+    indicadores = IndicadorDesempenoSerializer(many=True, required=False)
+    competencias = serializers.PrimaryKeyRelatedField(
+        many=True, required=False, queryset=CompetenciaConductual.objects.all(),
+    )
+    recursos = serializers.PrimaryKeyRelatedField(many=True, required=False, queryset=RecursoAsignado.objects.all())
+    conformidades = ConformidadDescriptivoSerializer(many=True, read_only=True)
+    esta_congelado = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = DescriptivoPuesto
+        fields = [
+            "id", "posicion", "version", "congelado_en", "esta_congelado",
+            "nombre_puesto", "empresa", "area_departamento", "reporta_a", "supervisa_a", "fecha_elaboracion",
+            "edad", "edad_otro", "disponibilidad_viajar",
+            "dias_por_laborar", "dias_por_laborar_otro", "horario", "horario_otro",
+            "proposito", "decisiones_operativas", "decisiones_funcionales", "decisiones_estrategicas",
+            "relaciones_internas", "relaciones_externas",
+            "escolaridad_minima", "experiencia_requerida", "idiomas", "competencias_tecnicas",
+            "competencias", "competencias_otras", "recursos", "recursos_otro",
+            "funciones", "indicadores", "conformidades",
+        ]
+        read_only_fields = ["id", "version", "congelado_en"]
+        # La unicidad (posición, versión) y "un solo borrador" las valida el
+        # full_clean() del modelo -- el validador automático de DRF no respeta
+        # las condiciones de las UniqueConstraint (ver ConformidadDescriptivoSerializer).
+        validators = []
+
+    def validate(self, attrs):
+        # Cambiar la Posición de una versión ya creada rompería la numeración
+        # (v1, v2... son por Posición): se crea otro Descriptivo en su lugar.
+        if self.instance and "posicion" in attrs and attrs["posicion"].pk != self.instance.posicion_id:
+            raise serializers.ValidationError({"posicion": "No se puede cambiar la Posición de un Descriptivo."})
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        # Quién dio su conformidad (personas concretas) no es un dato que
+        # deba ver cualquier Colaborador -- mismo criterio que no exponer un
+        # directorio de compañeros.
+        if request is None or not es_gestion_rrhh(request.user):
+            data.pop("conformidades", None)
+        return data
+
+    def _guardar_listas(self, descriptivo, funciones, indicadores, competencias, recursos):
+        usuario = self.context["request"].user
+        for modelo, relacion, elementos in (
+            (FuncionPuesto, descriptivo.funciones, funciones),
+            (IndicadorDesempeno, descriptivo.indicadores, indicadores),
+        ):
+            if elementos is None:
+                continue
+            relacion.all().delete()
+            for numero, elemento in enumerate(elementos, start=1):
+                modelo.objects.create(
+                    descriptivo=descriptivo, orden=numero, texto=elemento["texto"],
+                    created_by=usuario, updated_by=usuario,
+                )
+        if competencias is not None:
+            descriptivo.competencias.set(competencias)
+        if recursos is not None:
+            descriptivo.recursos.set(recursos)
+
+    def _separar_listas(self, validated_data):
+        return tuple(validated_data.pop(clave, None) for clave in ("funciones", "indicadores", "competencias", "recursos"))
+
+    def create(self, validated_data):
+        listas = self._separar_listas(validated_data)
+        with transaction.atomic():
+            descriptivo = super().create(validated_data)
+            self._guardar_listas(descriptivo, *listas)
+        return descriptivo
+
+    def update(self, instance, validated_data):
+        listas = self._separar_listas(validated_data)
+        with transaction.atomic():
+            # full_clean() corre primero y rechaza una versión congelada
+            # antes de que se toque cualquier lista o casilla.
+            descriptivo = super().update(instance, validated_data)
+            self._guardar_listas(descriptivo, *listas)
+        return descriptivo
+
+
+class CrearBorradorSerializer(serializers.Serializer):
+    posicion = serializers.PrimaryKeyRelatedField(queryset=Posicion.objects.all())

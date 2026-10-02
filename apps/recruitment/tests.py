@@ -251,6 +251,14 @@ class RecruitmentAPIAuthenticationTests(RecruitmentTestDataMixin, APITestCase):
             reverse("horarioacubrir-list"),
             reverse("requisicion-list"),
             reverse("aprobacionrequisicion-list"),
+            reverse("rangoedad-list"),
+            reverse("diasporlaborar-list"),
+            reverse("competenciaconductual-list"),
+            reverse("recursoasignado-list"),
+            reverse("rolconformidad-list"),
+            reverse("descriptivopuesto-list"),
+            reverse("descriptivopuesto-vigente"),
+            reverse("conformidaddescriptivo-list"),
         ]
         for url in protected_urls:
             with self.subTest(url=url):
@@ -967,3 +975,437 @@ class ConformidadDescriptivoTests(DescriptivoPuestoTestMixin, TestCase):
         )
         conformidad = self._conformidad(descriptivo, "Jefe inmediato", fecha=date(2026, 3, 1), usuario=usuario)
         self.assertEqual(conformidad.usuario, usuario)
+
+
+class DescriptivoPuestoAPITests(DescriptivoPuestoTestMixin, APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        user_model = get_user_model()
+        cls.gestor = user_model.objects.create_user(
+            username="descriptivo-gestor", email="descriptivo-gestor@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="capital-humano"),
+        )
+        cls.colaborador = user_model.objects.create_user(
+            username="descriptivo-colaborador", email="descriptivo-colaborador@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="colaborador"),
+        )
+        cls.puesto = Puesto.objects.create(name="Soldador de Prueba")
+
+    def _payload(self, posicion, **extra):
+        return {"posicion": str(posicion.pk), "fecha_elaboracion": "2026-01-10", **extra}
+
+    def _crear_por_api(self, posicion, **extra):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(reverse("descriptivopuesto-list"), self._payload(posicion, **extra), format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return response.data
+
+    def test_catalogos_son_de_solo_lectura_para_cualquier_autenticado(self):
+        self.client.force_authenticate(user=self.colaborador)
+        for nombre, cuantos in (
+            ("rangoedad-list", 5), ("diasporlaborar-list", 3), ("competenciaconductual-list", 12),
+            ("recursoasignado-list", 10), ("rolconformidad-list", 3),
+        ):
+            with self.subTest(catalogo=nombre):
+                self.assertEqual(self.client.get(reverse(nombre)).data["count"], cuantos)
+                self.assertEqual(
+                    self.client.post(reverse(nombre), {"name": "Nuevo"}, format="json").status_code,
+                    status.HTTP_405_METHOD_NOT_ALLOWED,
+                )
+
+    def test_un_colaborador_puede_leer_pero_no_escribir_descriptivos(self):
+        posicion = self.create_posicion()
+        descriptivo = self.crear_descriptivo(posicion)
+        self.client.force_authenticate(user=self.colaborador)
+
+        self.assertEqual(self.client.get(reverse("descriptivopuesto-list")).data["count"], 1)
+        self.assertEqual(
+            self.client.get(reverse("descriptivopuesto-detail", args=[descriptivo.pk])).status_code, status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            self.client.post(reverse("descriptivopuesto-list"), self._payload(self.create_posicion()), format="json").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.patch(
+                reverse("descriptivopuesto-detail", args=[descriptivo.pk]), {"proposito": "x"}, format="json",
+            ).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self.client.delete(reverse("descriptivopuesto-detail", args=[descriptivo.pk])).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        for accion, metodo in (("crear-borrador", None), ("copiar", descriptivo.pk), ("congelar", descriptivo.pk)):
+            with self.subTest(accion=accion):
+                url = reverse(f"descriptivopuesto-{accion}", args=[metodo] if metodo else [])
+                self.assertEqual(self.client.post(url, {}, format="json").status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_gestor_crea_un_descriptivo_completo_en_una_sola_llamada(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        liderazgo = CompetenciaConductual.objects.get(name="Liderazgo")
+        epp = RecursoAsignado.objects.get(name="Uniforme/EPP")
+        datos = self._crear_por_api(
+            posicion,
+            nombre_puesto="Soldador", proposito="Soldar estructuras",
+            edad=RangoEdad.objects.get(name="26-35 años").pk, disponibilidad_viajar=False,
+            horario=HorarioACubrir.objects.get(name="7:00 - 16:00").pk,
+            funciones=[{"texto": "Soldar piezas"}, {"texto": "Revisar acabados"}],
+            indicadores=[{"texto": "Piezas por turno"}],
+            competencias=[liderazgo.pk], recursos=[epp.pk],
+        )
+
+        self.assertEqual(datos["version"], 1)
+        self.assertFalse(datos["esta_congelado"])
+        self.assertEqual(datos["funciones"], [{"orden": 1, "texto": "Soldar piezas"}, {"orden": 2, "texto": "Revisar acabados"}])
+        self.assertEqual(datos["indicadores"], [{"orden": 1, "texto": "Piezas por turno"}])
+        self.assertEqual(datos["competencias"], [liderazgo.pk])
+        self.assertEqual(datos["recursos"], [epp.pk])
+        descriptivo = DescriptivoPuesto.objects.get(pk=datos["id"])
+        self.assertEqual(descriptivo.created_by, self.gestor)
+        self.assertEqual(descriptivo.funciones.first().created_by, self.gestor)
+        self.assertIs(descriptivo.disponibilidad_viajar, False)
+
+    def test_crear_con_listas_invalidas_no_deja_nada_a_medias(self):
+        posicion = self.create_posicion()
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(
+            reverse("descriptivopuesto-list"),
+            self._payload(posicion, funciones=[{"texto": "Valida"}, {"texto": ""}]), format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DescriptivoPuesto.objects.count(), 0)
+        self.assertEqual(FuncionPuesto.objects.count(), 0)
+
+    def test_patch_reemplaza_las_listas_que_se_mandan_y_respeta_las_que_se_omiten(self):
+        posicion = self.create_posicion()
+        liderazgo = CompetenciaConductual.objects.get(name="Liderazgo")
+        integridad = CompetenciaConductual.objects.get(name="Integridad")
+        datos = self._crear_por_api(
+            posicion, funciones=[{"texto": "Una"}, {"texto": "Dos"}], indicadores=[{"texto": "Meta"}],
+            competencias=[liderazgo.pk],
+        )
+        url = reverse("descriptivopuesto-detail", args=[datos["id"]])
+
+        response = self.client.patch(
+            url, {"funciones": [{"texto": "Nueva uno"}], "competencias": [integridad.pk]}, format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["funciones"], [{"orden": 1, "texto": "Nueva uno"}])
+        self.assertEqual(response.data["competencias"], [integridad.pk])
+        self.assertEqual(response.data["indicadores"], [{"orden": 1, "texto": "Meta"}])  # omitida: intacta
+        descriptivo = DescriptivoPuesto.objects.get(pk=datos["id"])
+        self.assertEqual(descriptivo.updated_by, self.gestor)
+
+        vaciar = self.client.patch(url, {"funciones": []}, format="json")
+        self.assertEqual(vaciar.data["funciones"], [])
+
+    def test_no_se_puede_cambiar_la_posicion_de_un_descriptivo(self):
+        datos = self._crear_por_api(self.create_posicion())
+        response = self.client.patch(
+            reverse("descriptivopuesto-detail", args=[datos["id"]]),
+            {"posicion": str(self.create_posicion().pk)}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("posicion", response.data)
+
+    def test_segundo_borrador_en_la_misma_posicion_se_rechaza_con_400(self):
+        posicion = self.create_posicion()
+        self._crear_por_api(posicion)
+        response = self.client.post(reverse("descriptivopuesto-list"), self._payload(posicion), format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("posicion", response.data)
+
+    def test_crear_borrador_precarga_desde_la_posicion(self):
+        jefe = self.create_posicion(puesto=Puesto.objects.create(name="Supervisor de Prueba"))
+        posicion = self.create_posicion(puesto=self.puesto, reports_to=jefe)
+        self.client.force_authenticate(user=self.gestor)
+
+        response = self.client.post(
+            reverse("descriptivopuesto-crear-borrador"), {"posicion": str(posicion.pk)}, format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["nombre_puesto"], "Soldador de Prueba")
+        self.assertEqual(response.data["reporta_a"], "Supervisor de Prueba")
+        self.assertEqual(response.data["empresa"], self.company_node.name)
+        self.assertEqual(response.data["version"], 1)
+        self.assertEqual(DescriptivoPuesto.objects.get(pk=response.data["id"]).created_by, self.gestor)
+
+        otra_vez = self.client.post(
+            reverse("descriptivopuesto-crear-borrador"), {"posicion": str(posicion.pk)}, format="json",
+        )
+        self.assertEqual(otra_vez.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_crear_borrador_exige_una_posicion_que_exista(self):
+        self.client.force_authenticate(user=self.gestor)
+        sin_posicion = self.client.post(reverse("descriptivopuesto-crear-borrador"), {}, format="json")
+        self.assertEqual(sin_posicion.status_code, status.HTTP_400_BAD_REQUEST)
+        inexistente = self.client.post(
+            reverse("descriptivopuesto-crear-borrador"),
+            {"posicion": "00000000-0000-0000-0000-000000000000"}, format="json",
+        )
+        self.assertEqual(inexistente.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_congelar_deja_la_version_inmutable_para_edicion_y_borrado(self):
+        posicion = self.create_posicion()
+        liderazgo = CompetenciaConductual.objects.get(name="Liderazgo")
+        datos = self._crear_por_api(
+            posicion, proposito="Original", funciones=[{"texto": "Una"}], competencias=[liderazgo.pk],
+        )
+        url = reverse("descriptivopuesto-detail", args=[datos["id"]])
+
+        congelado = self.client.post(reverse("descriptivopuesto-congelar", args=[datos["id"]]))
+        self.assertEqual(congelado.status_code, status.HTTP_200_OK, congelado.data)
+        self.assertTrue(congelado.data["esta_congelado"])
+        self.assertIsNotNone(congelado.data["congelado_en"])
+
+        self.assertEqual(
+            self.client.post(reverse("descriptivopuesto-congelar", args=[datos["id"]])).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        edicion = self.client.patch(
+            url, {"proposito": "Cambiado", "funciones": [{"texto": "Otra"}], "competencias": []}, format="json",
+        )
+        self.assertEqual(edicion.status_code, status.HTTP_400_BAD_REQUEST)
+        solo_lista = self.client.patch(url, {"funciones": [{"texto": "Otra"}]}, format="json")
+        self.assertEqual(solo_lista.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_400_BAD_REQUEST)
+
+        intacto = self.client.get(url).data
+        self.assertEqual(intacto["proposito"], "Original")
+        self.assertEqual(intacto["funciones"], [{"orden": 1, "texto": "Una"}])
+        self.assertEqual(intacto["competencias"], [liderazgo.pk])
+
+    def test_borrar_un_borrador_es_borrado_logico(self):
+        datos = self._crear_por_api(self.create_posicion())
+        response = self.client.delete(reverse("descriptivopuesto-detail", args=[datos["id"]]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self.client.get(reverse("descriptivopuesto-list")).data["count"], 0)
+        borrado = DescriptivoPuesto.all_objects.get(pk=datos["id"])
+        self.assertTrue(borrado.is_deleted)
+        self.assertEqual(borrado.deleted_by, self.gestor)
+
+    def test_copiar_abre_un_borrador_nuevo_y_respeta_la_regla_de_uno_solo(self):
+        datos = self._crear_por_api(self.create_posicion(), funciones=[{"texto": "Una"}])
+        self.client.post(reverse("descriptivopuesto-congelar", args=[datos["id"]]))
+
+        copia = self.client.post(reverse("descriptivopuesto-copiar", args=[datos["id"]]))
+        self.assertEqual(copia.status_code, status.HTTP_201_CREATED, copia.data)
+        self.assertEqual(copia.data["version"], 2)
+        self.assertNotEqual(copia.data["id"], datos["id"])
+        self.assertFalse(copia.data["esta_congelado"])
+        self.assertEqual(copia.data["funciones"], [{"orden": 1, "texto": "Una"}])
+        self.assertEqual(DescriptivoPuesto.objects.get(pk=copia.data["id"]).created_by, self.gestor)
+
+        de_nuevo = self.client.post(reverse("descriptivopuesto-copiar", args=[datos["id"]]))
+        self.assertEqual(de_nuevo.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_vigente_devuelve_la_congelada_mas_reciente(self):
+        posicion = self.create_posicion()
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-vigente")
+        self.assertEqual(self.client.get(url, {"posicion": str(posicion.pk)}).status_code, status.HTTP_404_NOT_FOUND)
+
+        v1 = self.crear_descriptivo(posicion)
+        # Un borrador no es vigente.
+        self.assertEqual(self.client.get(url, {"posicion": str(posicion.pk)}).status_code, status.HTTP_404_NOT_FOUND)
+        v1.congelar()
+        self.assertEqual(self.client.get(url, {"posicion": str(posicion.pk)}).data["id"], str(v1.pk))
+        v2 = copiar_version(v1)
+        self.assertEqual(self.client.get(url, {"posicion": str(posicion.pk)}).data["id"], str(v1.pk))
+        v2.congelar()
+        self.assertEqual(self.client.get(url, {"posicion": str(posicion.pk)}).data["id"], str(v2.pk))
+
+    def test_vigente_exige_una_posicion_valida(self):
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-vigente")
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(url, {"posicion": "no-es-un-id"}).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            self.client.get(url, {"posicion": "00000000-0000-0000-0000-000000000000"}).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_filtros_por_posicion_y_por_congelado(self):
+        una, otra = self.create_posicion(), self.create_posicion()
+        congelado = self.crear_descriptivo(una)
+        congelado.congelar()
+        borrador_de_una = copiar_version(congelado)
+        borrador_de_otra = self.crear_descriptivo(otra)
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-list")
+
+        def ids(**params):
+            return {fila["id"] for fila in self.client.get(url, params).data["results"]}
+
+        self.assertEqual(ids(posicion=str(una.pk)), {str(congelado.pk), str(borrador_de_una.pk)})
+        self.assertEqual(ids(congelado="true"), {str(congelado.pk)})
+        self.assertEqual(ids(congelado="false"), {str(borrador_de_una.pk), str(borrador_de_otra.pk)})
+        self.assertEqual(ids(posicion=str(una.pk), congelado="false"), {str(borrador_de_una.pk)})
+
+    def test_el_colaborador_no_ve_las_conformidades_pero_el_gestor_si(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        descriptivo.congelar()
+        ConformidadDescriptivo.objects.create(
+            descriptivo=descriptivo, rol=RolConformidad.objects.get(name="Jefe inmediato"),
+            fecha=date(2026, 3, 1), nombre_manual="Ana Jefa",
+        )
+        url = reverse("descriptivopuesto-detail", args=[descriptivo.pk])
+
+        self.client.force_authenticate(user=self.colaborador)
+        self.assertNotIn("conformidades", self.client.get(url).data)
+        self.assertNotIn("conformidades", self.client.get(reverse("descriptivopuesto-list")).data["results"][0])
+
+        self.client.force_authenticate(user=self.gestor)
+        conformidades = self.client.get(url).data["conformidades"]
+        self.assertEqual(len(conformidades), 1)
+        self.assertEqual(conformidades[0]["nombre_manual"], "Ana Jefa")
+
+
+class ConformidadDescriptivoAPITests(DescriptivoPuestoTestMixin, APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        user_model = get_user_model()
+        cls.gestor = user_model.objects.create_user(
+            username="conformidad-gestor", email="conformidad-gestor@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="capital-humano"),
+        )
+        cls.colaborador = user_model.objects.create_user(
+            username="conformidad-colaborador", email="conformidad-colaborador@example.com",
+            password="strong-test-password", role=UserRole.objects.get(code="colaborador"),
+        )
+        cls.rol_jefe = RolConformidad.objects.get(name="Jefe inmediato")
+        cls.rol_colaborador = RolConformidad.objects.get(name="Colaborador")
+
+    def _congelado(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        descriptivo.congelar()
+        return descriptivo
+
+    def test_un_colaborador_no_puede_leer_ni_crear_conformidades(self):
+        self.client.force_authenticate(user=self.colaborador)
+        self.assertEqual(self.client.get(reverse("conformidaddescriptivo-list")).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(
+            self.client.post(reverse("conformidaddescriptivo-list"), {}, format="json").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_gestor_registra_una_conformidad_sobre_una_version_congelada(self):
+        descriptivo = self._congelado()
+        persona = self.crear_persona()
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(
+            reverse("conformidaddescriptivo-list"),
+            {
+                "descriptivo": str(descriptivo.pk), "rol": str(self.rol_colaborador.pk),
+                "persona": str(persona.pk), "fecha": "2026-03-01",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(ConformidadDescriptivo.objects.get(pk=response.data["id"]).created_by, self.gestor)
+
+    def test_no_se_registra_conformidad_sobre_un_borrador(self):
+        borrador = self.crear_descriptivo(self.create_posicion())
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(
+            reverse("conformidaddescriptivo-list"),
+            {"descriptivo": str(borrador.pk), "rol": str(self.rol_jefe.pk)}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("descriptivo", response.data)
+
+    def test_el_colaborador_exige_persona_tambien_por_la_api(self):
+        descriptivo = self._congelado()
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(
+            reverse("conformidaddescriptivo-list"),
+            {"descriptivo": str(descriptivo.pk), "rol": str(self.rol_colaborador.pk)}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # El mensaje del modelo, no un genérico "campo requerido" del serializer.
+        self.assertIn("exige indicar la persona", str(response.data["persona"]))
+
+    def _registrar(self, descriptivo, rol, **extra):
+        return self.client.post(
+            reverse("conformidaddescriptivo-list"),
+            {"descriptivo": str(descriptivo.pk), "rol": str(rol.pk), **extra}, format="json",
+        )
+
+    def test_jefe_y_capital_humano_se_registran_sin_mandar_persona(self):
+        descriptivo = self._congelado()
+        self.client.force_authenticate(user=self.gestor)
+        jefe = self._registrar(descriptivo, self.rol_jefe, fecha="2026-03-01", nombre_manual="Ana Jefa")
+        self.assertEqual(jefe.status_code, status.HTTP_201_CREATED, jefe.data)
+        self.assertIsNone(jefe.data["persona"])
+        rh = self._registrar(
+            descriptivo, RolConformidad.objects.get(name="Capital Humano"), fecha="2026-03-02", nombre_manual="Rosa",
+        )
+        self.assertEqual(rh.status_code, status.HTTP_201_CREATED, rh.data)
+
+    def test_dos_personas_distintas_dan_su_conformidad_como_colaborador_por_la_api(self):
+        descriptivo = self._congelado()
+        self.client.force_authenticate(user=self.gestor)
+        primera = self._registrar(
+            descriptivo, self.rol_colaborador, persona=str(self.crear_persona("Luis").pk), fecha="2026-03-01",
+        )
+        segunda = self._registrar(
+            descriptivo, self.rol_colaborador, persona=str(self.crear_persona("Mara").pk), fecha="2027-03-01",
+        )
+        self.assertEqual(primera.status_code, status.HTTP_201_CREATED, primera.data)
+        self.assertEqual(segunda.status_code, status.HTTP_201_CREATED, segunda.data)
+
+    def test_la_misma_persona_o_el_mismo_rol_sin_persona_no_se_repiten_por_la_api(self):
+        descriptivo = self._congelado()
+        persona = self.crear_persona()
+        self.client.force_authenticate(user=self.gestor)
+        self.assertEqual(
+            self._registrar(descriptivo, self.rol_colaborador, persona=str(persona.pk), fecha="2026-03-01").status_code,
+            status.HTTP_201_CREATED,
+        )
+        self.assertEqual(
+            self._registrar(descriptivo, self.rol_colaborador, persona=str(persona.pk)).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertEqual(
+            self._registrar(descriptivo, self.rol_jefe, fecha="2026-03-01", nombre_manual="Ana").status_code,
+            status.HTTP_201_CREATED,
+        )
+        self.assertEqual(self._registrar(descriptivo, self.rol_jefe).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_una_conformidad_no_se_puede_mover_a_otra_version(self):
+        original = self._congelado()
+        otra = self._congelado()
+        conformidad = ConformidadDescriptivo.objects.create(
+            descriptivo=original, rol=self.rol_jefe, fecha=date(2026, 3, 1), nombre_manual="Ana",
+        )
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.patch(
+            reverse("conformidaddescriptivo-detail", args=[conformidad.pk]),
+            {"descriptivo": str(otra.pk)}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        conformidad.refresh_from_db()
+        self.assertEqual(conformidad.descriptivo_id, original.pk)
+
+    def test_listado_filtra_por_descriptivo_y_borrar_es_logico(self):
+        uno, otro = self._congelado(), self._congelado()
+        propia = ConformidadDescriptivo.objects.create(
+            descriptivo=uno, rol=self.rol_jefe, fecha=date(2026, 3, 1), nombre_manual="Ana",
+        )
+        ConformidadDescriptivo.objects.create(
+            descriptivo=otro, rol=self.rol_jefe, fecha=date(2026, 3, 1), nombre_manual="Beto",
+        )
+        self.client.force_authenticate(user=self.gestor)
+
+        filtradas = self.client.get(reverse("conformidaddescriptivo-list"), {"descriptivo": str(uno.pk)})
+        self.assertEqual([fila["id"] for fila in filtradas.data["results"]], [str(propia.pk)])
+
+        borrada = self.client.delete(reverse("conformidaddescriptivo-detail", args=[propia.pk]))
+        self.assertEqual(borrada.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ConformidadDescriptivo.objects.filter(pk=propia.pk).exists())
+        self.assertTrue(ConformidadDescriptivo.all_objects.get(pk=propia.pk).is_deleted)
