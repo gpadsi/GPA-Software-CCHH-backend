@@ -42,9 +42,13 @@ Requiere HTTPS habilitado en `nginx/capital_humano.conf` — `config.settings.pr
 
 1. Espera a que PostgreSQL responda (`pg_isready`).
 2. **Migraciones: solo el rol `web` las aplica.** El rol `celery` espera con `migrate --check` a que el esquema esté al día antes de arrancar.
-3. Solo en `web`: `collectstatic` (excepto en dev, donde `runserver` sirve estáticos vía finders) y verificación/creación del superusuario inicial.
+3. Solo en `web`: `collectstatic` (excepto en dev, donde `runserver` sirve estáticos vía finders), los `seed_*` de catálogos base (incluidos los roles de usuario) y `ensure_superuser`.
 
-El rol se fija con la variable `APP_ROLE` (`web` / `celery`) en los `docker-compose.*.yml`.
+`ensure_superuser` crea el superusuario de `DJANGO_SUPERUSER_*` con rol **Admin** (los permisos de la API se deciden por rol, no por `is_superuser`). Si ya existe y no tiene rol, le asigna Admin; no cambia su contraseña. No lo crea si `DJANGO_SUPERUSER_PASSWORD` está vacío, ni fuera de dev si sigue con el valor de ejemplo de `.env.example`.
+
+Las esperas de los pasos 1 y 2 abortan tras `STARTUP_WAIT_TIMEOUT` segundos (300 por defecto) mostrando el último error. Cualquier paso que falle detiene el contenedor con el error en `docker compose logs`.
+
+El rol se fija con la variable `APP_ROLE` (`web` / `celery`) en los `docker-compose.*.yml`. `entrypoint.sh` se copia a la imagen en el build (no entra por el bind mount de dev): tras editarlo hay que reconstruir con `--build`.
 
 ## Estructura del proyecto
 

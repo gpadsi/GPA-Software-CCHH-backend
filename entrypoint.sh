@@ -2,24 +2,49 @@
 # entrypoint.sh — Capital Humano
 # Se ejecuta en TODOS los contenedores (web + celery) antes del CMD.
 # La variable APP_ROLE diferencia qué pasos extra corre cada uno.
-#   web    → migrate + collectstatic + superusuario + gunicorn/runserver
+#   web    → migrate + collectstatic + catálogos + superusuario + gunicorn/runserver
 #   celery → espera a que web aplique las migraciones + celery worker
 #
 # IMPORTANTE: las migraciones las aplica EXCLUSIVAMENTE el rol web. celery solo
 # ESPERA (migrate --check) a que el esquema esté al día antes de arrancar. Esto
 # evita la condición de carrera de dos procesos corriendo `migrate` a la vez
 # sobre una BD vacía (patrón adoptado de CIAgro, donde ese bug sí ocurrió).
+#
+# Cualquier paso que falle detiene el arranque con su error visible en
+# `docker compose logs`: un contenedor que no arranca es preferible a uno que
+# arranca con catálogos o roles a medias.
 set -e
+
+# `docker stop` manda SIGTERM a este script (PID 1) mientras espera en los
+# bucles de abajo; sin trap, sh lo ignora y Docker lo mata a los 10 s.
+trap 'exit 143' TERM INT
+
+WAIT_TIMEOUT="${STARTUP_WAIT_TIMEOUT:-300}"
+
+# wait_for <descripción> <comando...>
+# Reintenta el comando cada 2 s. Si pasan WAIT_TIMEOUT segundos sin éxito,
+# muestra la última salida del comando y aborta en lugar de esperar para siempre.
+wait_for() {
+    description="$1"
+    shift
+    elapsed=0
+    while ! output=$("$@" 2>&1); do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            echo "!! Timeout de ${WAIT_TIMEOUT}s esperando: ${description}. Última salida:" >&2
+            echo "$output" >&2
+            exit 1
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+}
 
 # ── 1. Esperar a que PostgreSQL esté listo ──────────────────────────────────
 echo "==> [Capital Humano] Esperando base de datos en ${POSTGRES_HOST:-db}:${POSTGRES_PORT:-5432}..."
-until pg_isready \
+wait_for "PostgreSQL" pg_isready \
     -h "${POSTGRES_HOST:-db}" \
     -p "${POSTGRES_PORT:-5432}" \
-    -U "${POSTGRES_USER:-ch_user}" \
-    -q; do
-    sleep 2
-done
+    -U "${POSTGRES_USER:-ch_user}"
 echo "    Base de datos lista."
 
 # ── 2. Migraciones — SÓLO el rol web las aplica ─────────────────────────────
@@ -28,9 +53,7 @@ if [ "${APP_ROLE:-web}" = "web" ]; then
     python manage.py migrate --no-input
 else
     echo "==> [${APP_ROLE:-?}] Esperando a que web aplique las migraciones..."
-    until python manage.py migrate --check >/dev/null 2>&1; do
-        sleep 2
-    done
+    wait_for "migraciones aplicadas por web" python manage.py migrate --check
     echo "    Esquema al día."
 fi
 
@@ -47,43 +70,28 @@ if [ "${APP_ROLE:-web}" = "web" ]; then
             ;;
     esac
 
-    echo "==> Sembrando catálogo de tipos de documento..."
-    python manage.py seed_document_types 2>/dev/null || true
-
-    echo "==> Sembrando organización (Tenant)..."
-    python manage.py seed_tenant 2>/dev/null || true
-
-    echo "==> Sembrando niveles organizacionales..."
-    python manage.py seed_organizational_levels 2>/dev/null || true
-
-    echo "==> Sembrando empresas y unidades de negocio de Grupo GPA..."
-    python manage.py seed_gpa_companies 2>/dev/null || true
-
-    echo "==> Sembrando catálogos de Persona..."
-    python manage.py seed_persons_catalogs 2>/dev/null || true
-
-    echo "==> Sembrando catálogos de Posición..."
-    python manage.py seed_position_catalogs 2>/dev/null || true
-
-    echo "==> Sembrando catálogos de Origen/Causa de baja..."
-    python manage.py seed_baja_catalogs 2>/dev/null || true
+    # Catálogos base, todos idempotentes. El orden importa:
+    # seed_gpa_companies necesita los niveles organizacionales,
+    # seed_recruitment_catalogs usa TipoRequisicion de seed_position_catalogs, y
+    # ensure_superuser (abajo) necesita los roles de usuario.
+    # --skip-checks: `migrate` ya imprimió los warnings del system check una vez.
+    for seed in \
+        seed_document_types \
+        seed_tenant \
+        seed_organizational_levels \
+        seed_gpa_companies \
+        seed_user_roles \
+        seed_persons_catalogs \
+        seed_position_catalogs \
+        seed_recruitment_catalogs \
+        seed_baja_catalogs
+    do
+        echo "==> ${seed}"
+        python manage.py "$seed" --skip-checks
+    done
 
     echo "==> Verificando superusuario inicial..."
-    python manage.py shell -c "
-from django.contrib.auth import get_user_model
-User = get_user_model()
-username = '${DJANGO_SUPERUSER_USERNAME:-admin}'
-user = User.objects.filter(username=username).first()
-if user is None:
-    User.objects.create_superuser(
-        username,
-        '${DJANGO_SUPERUSER_EMAIL:-admin@capitalhumano.local}',
-        '${DJANGO_SUPERUSER_PASSWORD:-admin}'
-    )
-    print(f'  Superusuario creado: {username}')
-else:
-    print(f'  Superusuario ya existe: {username}')
-" 2>/dev/null || true
+    python manage.py ensure_superuser --skip-checks
 
 fi
 
