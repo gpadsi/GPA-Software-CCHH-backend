@@ -102,12 +102,43 @@ class SchedulesRoleAPITests(SchedulesTestDataMixin, APITestCase):
             empleado=cls.otro_empleado, fecha_referencia=date(2026, 1, 1), tipo_horario=cls.tipo_horario,
         )
 
-    def test_tipo_horario_catalog_is_read_only(self):
+    def test_colaborador_reads_the_tipo_horario_catalog_but_cannot_write_it(self):
         self.client.force_authenticate(user=self.colaborador_user)
         response = self.client.get(reverse("tipohorario-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         create_response = self.client.post(reverse("tipohorario-list"), {"name": "H99"}, format="json")
-        self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+        update_response = self.client.patch(
+            reverse("tipohorario-detail", args=[self.tipo_horario.pk]), {"descripcion": "x"}, format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_gestor_creates_and_edits_a_tipo_horario_but_cannot_delete_it(self):
+        self.client.force_authenticate(user=self.gestor)
+        create_response = self.client.post(
+            reverse("tipohorario-list"), {"name": "H02", "descripcion": "08:00 - 17:00"}, format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["code"], "h02")
+        self.assertEqual(create_response.data["descripcion"], "08:00 - 17:00")
+
+        url = reverse("tipohorario-detail", args=[create_response.data["id"]])
+        update_response = self.client.patch(
+            url, {"descripcion": "08:00 - 16:00", "is_active": False}, format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data["descripcion"], "08:00 - 16:00")
+        self.assertFalse(update_response.data["is_active"])
+
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(TipoHorario.objects.filter(pk=create_response.data["id"]).exists())
+
+    def test_tipo_horario_name_cannot_repeat_ignoring_case(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.post(reverse("tipohorario-list"), {"name": "h01"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("name", response.data)
+        self.assertEqual(TipoHorario.objects.count(), 1)
 
     def test_colaborador_can_read_every_catorcena_but_cannot_write(self):
         Catorcena.objects.create(numero=1, anio=2026, fecha_inicio=date(2026, 1, 1), fecha_fin=date(2026, 1, 14))

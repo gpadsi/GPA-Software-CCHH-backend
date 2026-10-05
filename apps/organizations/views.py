@@ -68,6 +68,8 @@ class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.order_by("pk")
     serializer_class = CompanySerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+    search_fields = ["organization_node__name", "legal_name", "rfc", "employer_registration"]
+    ordering_fields = ["organization_node__name", "legal_name", "rfc", "employer_registration"]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user, updated_by=self.request.user)

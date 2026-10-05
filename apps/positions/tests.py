@@ -5,8 +5,9 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -260,14 +261,110 @@ class PosicionRoleAPITests(PositionsTestDataMixin, APITestCase):
         cls.puesto = Puesto.objects.create(name="Auxiliar de Producción")
         cls.posicion = cls.create_posicion(puesto=cls.puesto)
 
-    def test_puesto_catalog_is_read_only_for_any_authenticated_user(self):
+    def test_colaborador_reads_the_puesto_catalog_but_cannot_write_it(self):
         self.client.force_authenticate(user=self.colaborador)
         response = self.client.get(reverse("puesto-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
 
         create_response = self.client.post(reverse("puesto-list"), {"name": "Nuevo"}, format="json")
-        self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+        update_response = self.client.patch(
+            reverse("puesto-detail", args=[self.puesto.pk]), {"name": "Cambiado"}, format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.puesto.refresh_from_db()
+        self.assertEqual(self.puesto.name, "Auxiliar de Producción")
+
+    def test_gestor_creates_a_puesto_with_a_generated_code_and_edits_it_keeping_the_code(self):
+        self.client.force_authenticate(user=self.gestor)
+        create_response = self.client.post(
+            reverse("puesto-list"), {"name": "Jefe de Almacén", "es_gerencia_de_unidad": False}, format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["code"], "jefe-de-almacen")
+        self.assertTrue(create_response.data["is_active"])
+        self.assertFalse(create_response.data["es_gerencia_de_unidad"])
+
+        url = reverse("puesto-detail", args=[create_response.data["id"]])
+        # `code` es de solo lectura: mandarlo no lo cambia, y renombrar tampoco.
+        update_response = self.client.patch(
+            url, {"name": "Jefe de Almacén General", "code": "otro-codigo", "is_active": False}, format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data["code"], "jefe-de-almacen")
+        self.assertEqual(update_response.data["name"], "Jefe de Almacén General")
+        self.assertFalse(update_response.data["is_active"])
+
+    def test_gestor_can_mark_a_puesto_as_gerencia_de_unidad(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.patch(
+            reverse("puesto-detail", args=[self.puesto.pk]), {"es_gerencia_de_unidad": True}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.puesto.refresh_from_db()
+        self.assertTrue(self.puesto.es_gerencia_de_unidad)
+
+    def test_puesto_name_cannot_repeat_ignoring_case_on_create_or_rename(self):
+        self.client.force_authenticate(user=self.gestor)
+        create_response = self.client.post(
+            reverse("puesto-list"), {"name": "  auxiliar de producción  "}, format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("name", create_response.data)
+
+        otro = Puesto.objects.create(name="Operador")
+        rename_response = self.client.patch(
+            reverse("puesto-detail", args=[otro.pk]), {"name": "AUXILIAR DE PRODUCCIÓN"}, format="json",
+        )
+        self.assertEqual(rename_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Puesto.objects.count(), 2)
+
+    def test_editing_another_field_of_an_already_repeated_puesto_is_not_blocked(self):
+        # Los datos reales traen variantes repetidas: solo se revisa el
+        # nombre cuando alguien lo cambia, no al desactivar el puesto.
+        repetido = Puesto.objects.create(name="auxiliar de producción")
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.patch(
+            reverse("puesto-detail", args=[repetido.pk]), {"is_active": False}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_puesto_cannot_be_deleted_through_the_api(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.delete(reverse("puesto-detail", args=[self.puesto.pk]))
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(Puesto.objects.filter(pk=self.puesto.pk).exists())
+
+    def test_posicion_etiqueta_nombra_puesto_unidad_y_area(self):
+        self.client.force_authenticate(user=self.colaborador)
+        datos = self.client.get(reverse("posicion-detail", args=[self.posicion.pk])).data
+        self.assertEqual(datos["etiqueta"], "Auxiliar de Producción — Empresa de prueba")
+
+        sin_puesto = self.create_posicion()
+        datos = self.client.get(reverse("posicion-detail", args=[sin_puesto.pk])).data
+        self.assertEqual(datos["etiqueta"], "Sin puesto — Empresa de prueba")
+
+    def test_la_etiqueta_no_se_puede_escribir_y_la_lista_no_hace_una_consulta_por_fila(self):
+        self.client.force_authenticate(user=self.gestor)
+        self.client.patch(reverse("posicion-detail", args=[self.posicion.pk]), {"etiqueta": "x"}, format="json")
+        self.posicion.refresh_from_db()
+        self.assertEqual(self.posicion.etiqueta, "Auxiliar de Producción — Empresa de prueba")
+
+        for _ in range(5):
+            self.create_posicion(puesto=self.puesto)
+        with CaptureQueriesContext(connection) as consultas:
+            self.client.get(reverse("posicion-list"))
+        # Con select_related, 6 filas no cuestan más consultas que 1.
+        self.assertLess(len(consultas), 12)
+
+    def test_tipos_de_requisicion_dicen_cual_exige_justificacion(self):
+        from apps.positions.models import TipoRequisicion
+        TipoRequisicion.objects.create(name="Reemplazo")
+        TipoRequisicion.objects.create(name="Nueva Posición", requiere_justificacion=True)
+        self.client.force_authenticate(user=self.colaborador)
+        filas = {r["name"]: r["requiere_justificacion"] for r in self.client.get(reverse("tiporequisicion-list")).data["results"]}
+        self.assertEqual(filas, {"Reemplazo": False, "Nueva Posición": True})
 
     def test_colaborador_can_read_every_posicion(self):
         # Posicion es estructural (no expone quién la ocupa) — cualquier

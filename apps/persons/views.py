@@ -57,6 +57,10 @@ class PersonaViewSet(viewsets.ModelViewSet):
     queryset = Persona.objects.order_by("pk")
     serializer_class = PersonaSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+    # ?search= (sin acentos) y ?ordering= -- solo por lo que la tabla muestra.
+    # NSS/RFC no se buscan ni se ordenan: no son columnas de la lista.
+    search_fields = ["first_name", "last_name_paternal", "last_name_maternal", "curp", "personal_email", "phone"]
+    ordering_fields = ["last_name_paternal", "last_name_maternal", "first_name", "curp", "personal_email", "phone"]
 
     def get_queryset(self):
         return scope_to_own_unless_management(super().get_queryset(), self.request.user, "empleado__user")

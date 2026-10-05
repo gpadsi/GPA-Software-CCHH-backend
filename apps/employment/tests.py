@@ -183,7 +183,7 @@ class EmpleadoJefeResolutionTests(EmploymentTestDataMixin, TestCase):
         jefe = empleado.get_jefe()
         self.assertEqual(jefe["posicion_id"], posicion_jefe.id)
         self.assertEqual(jefe["empleado_id"], jefe_empleado.id)
-        self.assertEqual(jefe["nombre"], "Torres  Ana")
+        self.assertEqual(jefe["nombre"], "Torres Ana")
 
     def test_jefe_ignores_a_boss_who_already_left_that_position(self):
         posicion_jefe = self.create_posicion()
@@ -788,6 +788,46 @@ class EmpleadoContratoRoleAPITests(EmploymentTestDataMixin, APITestCase):
         )
         self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_gestor_creates_empleados_without_work_number_and_they_do_not_collide(self):
+        # work_number es unico y opcional: dos empleados "sin numero" no
+        # pueden guardarse como "" (chocarian). Ambos quedan en NULL.
+        self.client.force_authenticate(user=self.gestor)
+        for texto in ("", "   "):
+            response = self.client.post(
+                reverse("empleado-list"),
+                {"persona": str(self.create_persona().pk), "work_number": texto},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+            self.assertIsNone(Empleado.objects.get(pk=response.data["id"]).work_number)
+
+    def test_gestor_cannot_reuse_a_work_number_or_a_persona(self):
+        self.client.force_authenticate(user=self.gestor)
+        repetido = self.client.post(
+            reverse("empleado-list"),
+            {"persona": str(self.create_persona().pk), "work_number": "ADV0001"},
+            format="json",
+        )
+        self.assertEqual(repetido.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("work_number", repetido.data)
+
+        misma_persona = self.client.post(
+            reverse("empleado-list"),
+            {"persona": str(self.colaborador_persona.pk), "work_number": "ADV0777"},
+            format="json",
+        )
+        self.assertEqual(misma_persona.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("persona", misma_persona.data)
+
+    def test_gestor_edits_the_work_number_of_an_empleado(self):
+        self.client.force_authenticate(user=self.gestor)
+        response = self.client.patch(
+            reverse("empleado-detail", args=[self.otro_empleado.pk]), {"work_number": "ADV0099"}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.otro_empleado.refresh_from_db()
+        self.assertEqual(self.otro_empleado.work_number, "ADV0099")
+
     # --- acción "jefe" ---
 
     def test_jefe_action_resolves_correctly_through_the_api(self):
@@ -802,7 +842,7 @@ class EmpleadoContratoRoleAPITests(EmploymentTestDataMixin, APITestCase):
         response = self.client.get(reverse("empleado-jefe", args=[self.colaborador_empleado_con_jefe.pk]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["empleado_id"], str(jefe_empleado.pk))
-        self.assertEqual(response.data["nombre"], "Lider  Ana")
+        self.assertEqual(response.data["nombre"], "Lider Ana")
 
     def test_colaborador_can_query_own_jefe_but_not_someone_elses(self):
         self.client.force_authenticate(user=self.colaborador_user)

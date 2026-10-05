@@ -2,6 +2,7 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoVa
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
+from apps.core.serializers import vacio_como_nulo
 from apps.employment.models import CausaBaja, Contrato, Empleado, HistorialSalarial, OrigenBaja
 
 
@@ -53,6 +54,10 @@ class EmpleadoSerializer(FullCleanModelSerializer):
         model = Empleado
         fields = ["id", "persona", "user", "work_number"]
         read_only_fields = ["id"]
+
+    def validate_work_number(self, value):
+        # Único y opcional: sin esto, dos empleados sin número chocarían con "".
+        return vacio_como_nulo(value)
 
 
 class ContratoSerializer(FullCleanModelSerializer):

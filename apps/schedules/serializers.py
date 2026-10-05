@@ -2,6 +2,7 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoVa
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
+from apps.core.serializers import validar_nombre_sin_repetir
 from apps.schedules.models import AsignacionHorario, AsignacionUbicacion, Catorcena, TipoHorario
 
 
@@ -38,7 +39,11 @@ class TipoHorarioSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoHorario
         fields = ["id", "code", "name", "descripcion", "is_active"]
-        read_only_fields = fields
+        # El código se genera solo al crear y ya no cambia (ver PuestoSerializer).
+        read_only_fields = ["id", "code"]
+
+    def validate_name(self, value):
+        return validar_nombre_sin_repetir(TipoHorario, self.instance, value, "un tipo de horario")
 
 
 class CatorcenaSerializer(FullCleanModelSerializer):

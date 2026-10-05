@@ -217,6 +217,18 @@ class Posicion(BaseAuditModel):
                 HistorialPuesto.objects.filter(posicion=self, fecha_fin__isnull=True).update(fecha_fin=hoy)
                 HistorialPuesto.objects.create(posicion=self, puesto=self.puesto, fecha_inicio=hoy)
 
+    @property
+    def etiqueta(self):
+        """
+        Cómo nombrarla a una persona: «Operador de Soldadura — PAILERIA
+        (Producción)». Una Posición no tiene nombre propio ni dos iguales por
+        puesto, así que se identifica por su Puesto, su unidad y, si la tiene,
+        su área física. Las listas (select_related) la arman sin consultas extra.
+        """
+        puesto = self.puesto.name if self.puesto_id else "Sin puesto"
+        texto = f"{puesto} — {self.organization_node.name}"
+        return f"{texto} ({self.area.name})" if self.area_id else texto
+
     def __str__(self):
         return f"{self.puesto} — {self.area}"
 

@@ -7,6 +7,7 @@ from zipfile import ZipFile
 
 import openpyxl
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
@@ -384,6 +385,111 @@ class RequisicionRoleAPITests(RecruitmentTestDataMixin, APITestCase):
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Requisicion.objects.filter(pk=ajena.pk).exists())
 
+    def _crear(self, usuario, puesto="Operador", **extra):
+        puesto_obj = Puesto.objects.get_or_create(name=puesto)[0]
+        return Requisicion.objects.create(
+            posicion=self.create_posicion(puesto=puesto_obj), tipo=self.tipo_reemplazo, estado=self.estado_borrador,
+            fecha_solicitud=extra.pop("fecha_solicitud", date(2026, 1, 1)), created_by=usuario, **extra,
+        )
+
+    def test_la_requisicion_trae_la_etiqueta_de_su_posicion_y_quien_la_solicito(self):
+        propia = self._crear(self.gerente, puesto="Operador de Soldadura")
+        self.gerente.first_name, self.gerente.last_name = "Ana", "Ruiz"
+        self.gerente.save()
+        self.client.force_authenticate(user=self.gestor)
+        datos = self.client.get(reverse("requisicion-detail", args=[propia.pk])).data
+        self.assertEqual(datos["posicion_etiqueta"], "Operador de Soldadura — Empresa de prueba")
+        self.assertEqual(datos["solicitante"], "Ana Ruiz")
+        self.assertEqual(datos["creado_por"], self.gerente.pk)
+
+    def test_una_requisicion_importada_no_tiene_solicitante(self):
+        importada = self._crear(None)
+        self.client.force_authenticate(user=self.gestor)
+        datos = self.client.get(reverse("requisicion-detail", args=[importada.pk])).data
+        self.assertIsNone(datos["solicitante"])
+        self.assertIsNone(datos["creado_por"])
+
+    def test_la_lista_busca_sin_acentos_y_ordena_solo_por_campos_declarados(self):
+        self._crear(self.gestor, puesto="Ingeniero de Servicio Técnico", fecha_solicitud=date(2026, 3, 1))
+        self._crear(self.gestor, puesto="Operador de Soldadura", fecha_solicitud=date(2026, 5, 1))
+        self.client.force_authenticate(user=self.gestor)
+        url = reverse("requisicion-list")
+
+        encontradas = self.client.get(url, {"search": "tecnico"}).data["results"]
+        self.assertEqual([r["posicion_etiqueta"].split(" — ")[0] for r in encontradas], ["Ingeniero de Servicio Técnico"])
+
+        por_fecha = self.client.get(url, {"ordering": "fecha_solicitud"}).data["results"]
+        self.assertEqual([r["fecha_solicitud"] for r in por_fecha], ["2026-03-01", "2026-05-01"])
+        por_fecha_desc = self.client.get(url, {"ordering": "-fecha_solicitud"}).data["results"]
+        self.assertEqual([r["fecha_solicitud"] for r in por_fecha_desc], ["2026-05-01", "2026-03-01"])
+        # Un campo que la tabla no muestra no se puede usar para ordenar.
+        self.assertEqual(self.client.get(url, {"ordering": "sueldo_mensual_neto"}).status_code, status.HTTP_200_OK)
+
+    def test_la_busqueda_de_un_colaborador_no_encuentra_las_de_otros(self):
+        self._crear(self.gerente, puesto="Soldador propio")
+        self._crear(self.otro_colaborador, puesto="Soldador ajeno")
+        self.client.force_authenticate(user=self.gerente)
+        etiquetas = [
+            r["posicion_etiqueta"] for r in self.client.get(reverse("requisicion-list"), {"search": "soldador"}).data["results"]
+        ]
+        self.assertEqual(len(etiquetas), 1)
+        self.assertIn("Soldador propio", etiquetas[0])
+
+    def test_la_lista_filtra_por_estado_y_tipo(self):
+        self._crear(self.gestor, puesto="Uno")
+        cubierta = self._crear(self.gestor, puesto="Dos")
+        Requisicion.objects.filter(pk=cubierta.pk).update(estado=self.estado_cubierta)
+        self.client.force_authenticate(user=self.gestor)
+        url = reverse("requisicion-list")
+        self.assertEqual(self.client.get(url, {"estado": self.estado_cubierta.pk}).data["count"], 1)
+        self.assertEqual(self.client.get(url, {"tipo": self.tipo_nueva.pk}).data["count"], 0)
+
+    def test_el_solicitante_no_se_puede_autorizar_a_si_mismo(self):
+        autorizada = EstadoRequisicion.objects.get(code="autorizada")
+        pendiente = EstadoRequisicion.objects.get(code="pendiente-de-autorizacion")
+        self.client.force_authenticate(user=self.gerente)
+        posicion = self.create_posicion()
+
+        # Al crear: no puede elegir un estado que no sea Borrador/Pendiente...
+        rechazada = self.client.post(
+            reverse("requisicion-list"), {**self._payload(posicion), "estado": str(autorizada.pk)}, format="json",
+        )
+        self.assertEqual(rechazada.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("estado", rechazada.data)
+
+        # ...pero sí puede crearla, y mandarla a autorización.
+        creada = self.client.post(reverse("requisicion-list"), self._payload(posicion), format="json")
+        self.assertEqual(creada.status_code, status.HTTP_201_CREATED)
+        url = reverse("requisicion-detail", args=[creada.data["id"]])
+        enviada = self.client.patch(url, {"estado": str(pendiente.pk)}, format="json")
+        self.assertEqual(enviada.status_code, status.HTTP_200_OK)
+
+        # Al editar: tampoco puede saltar a Autorizada.
+        salto = self.client.patch(url, {"estado": str(autorizada.pk)}, format="json")
+        self.assertEqual(salto.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Requisicion.objects.get(pk=creada.data["id"]).estado, pendiente)
+
+        # Capital Humano sí.
+        self.client.force_authenticate(user=self.gestor)
+        self.assertEqual(self.client.patch(url, {"estado": str(autorizada.pk)}, format="json").status_code, 200)
+
+    def test_sin_estado_la_requisicion_empieza_en_borrador(self):
+        self.client.force_authenticate(user=self.gerente)
+        payload = self._payload(self.create_posicion())
+        del payload["estado"]
+        respuesta = self.client.post(reverse("requisicion-list"), payload, format="json")
+        self.assertEqual(respuesta.status_code, status.HTTP_201_CREATED, respuesta.data)
+        self.assertEqual(respuesta.data["estado"], self.estado_borrador.pk)
+
+    def test_editar_otro_campo_no_toca_el_estado_aunque_ya_no_pueda_elegirlo(self):
+        propia = self._crear(self.gerente)
+        Requisicion.objects.filter(pk=propia.pk).update(estado=self.estado_cubierta)
+        self.client.force_authenticate(user=self.gerente)
+        respuesta = self.client.patch(
+            reverse("requisicion-detail", args=[propia.pk]), {"area_solicitante": "Mantenimiento"}, format="json",
+        )
+        self.assertEqual(respuesta.status_code, status.HTTP_200_OK)
+
     def test_el_dueno_puede_exportar_su_propia_requisicion_a_excel(self):
         propia = Requisicion.objects.create(
             posicion=self.create_posicion(), tipo=self.tipo_reemplazo, estado=self.estado_borrador,
@@ -614,7 +720,7 @@ class GenerarExcelTests(RecruitmentTestDataMixin, TestCase):
         self.assertEqual(ws["D5"].value, self.unidad_node.name)
         self.assertEqual(ws["M5"].value, self.company_node.name)
         self.assertEqual(ws["D6"].value, self.puesto_jefe.name)
-        self.assertEqual(ws["M6"].value, "Jefa  Ana")
+        self.assertEqual(ws["M6"].value, "Jefa Ana")
         self.assertEqual(ws["I9"].value, "X")   # horario "7:00 - 16:00"
         self.assertEqual(ws["O11"].value, "X")  # disposición a viajar: sí
         self.assertIsNone(ws["Q11"].value)       # limpia el "No" premarcado de la plantilla
@@ -1257,6 +1363,25 @@ class DescriptivoPuestoAPITests(DescriptivoPuestoTestMixin, APITestCase):
                     status.HTTP_405_METHOD_NOT_ALLOWED,
                 )
 
+    def test_la_lista_trae_la_etiqueta_de_la_posicion_y_busca_y_ordena(self):
+        puesto_a = Puesto.objects.create(name="Auxiliar de Almacén")
+        posicion_a = self.create_posicion(puesto=puesto_a)
+        posicion_b = self.create_posicion(puesto=self.puesto)
+        uno = self.crear_descriptivo(posicion_a, nombre_puesto="Auxiliar de Almacén", fecha_elaboracion=date(2026, 2, 1))
+        dos = self.crear_descriptivo(posicion_b, nombre_puesto="Soldador de Prueba", fecha_elaboracion=date(2026, 4, 1))
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-list")
+
+        datos = {r["id"]: r for r in self.client.get(url).data["results"]}
+        self.assertEqual(datos[str(uno.pk)]["posicion_etiqueta"], "Auxiliar de Almacén — Empresa de prueba")
+
+        # Sin acentos: "almacen" encuentra "Almacén".
+        encontrados = self.client.get(url, {"search": "almacen"}).data["results"]
+        self.assertEqual([r["id"] for r in encontrados], [str(uno.pk)])
+
+        ordenados = self.client.get(url, {"ordering": "-fecha_elaboracion"}).data["results"]
+        self.assertEqual([r["id"] for r in ordenados], [str(dos.pk), str(uno.pk)])
+
     def test_un_colaborador_puede_leer_pero_no_escribir_descriptivos(self):
         posicion = self.create_posicion()
         descriptivo = self.crear_descriptivo(posicion)
@@ -1580,6 +1705,23 @@ class ConformidadDescriptivoAPITests(DescriptivoPuestoTestMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(ConformidadDescriptivo.objects.get(pk=response.data["id"]).created_by, self.gestor)
 
+    def test_la_conformidad_trae_el_nombre_de_la_persona_sin_espacio_doble(self):
+        descriptivo = self._congelado()
+        persona = self.crear_persona("Luis")  # sin apellido materno
+        self.client.force_authenticate(user=self.gestor)
+        creada = self.client.post(
+            reverse("conformidaddescriptivo-list"),
+            {
+                "descriptivo": str(descriptivo.pk), "rol": str(self.rol_colaborador.pk),
+                "persona": str(persona.pk), "fecha": "2026-03-01",
+            },
+            format="json",
+        )
+        self.assertEqual(creada.data["persona_nombre"], "Prueba Luis")
+        # Y el detalle del descriptivo la trae sin una consulta por conformidad.
+        detalle = self.client.get(reverse("descriptivopuesto-detail", args=[descriptivo.pk])).data
+        self.assertEqual(detalle["conformidades"][0]["persona_nombre"], "Prueba Luis")
+
     def test_no_se_registra_conformidad_sobre_un_borrador(self):
         borrador = self.crear_descriptivo(self.create_posicion())
         self.client.force_authenticate(user=self.gestor)
@@ -1680,3 +1822,209 @@ class ConformidadDescriptivoAPITests(DescriptivoPuestoTestMixin, APITestCase):
         self.assertEqual(borrada.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(ConformidadDescriptivo.objects.filter(pk=propia.pk).exists())
         self.assertTrue(ConformidadDescriptivo.all_objects.get(pk=propia.pk).is_deleted)
+
+
+class AdminDescargasOficialesTests(DescriptivoPuestoTestMixin, TestCase):
+    """
+    Acciones del admin para sacar los archivos oficiales sin frontend ni
+    token: los mismos que entregan exportar-excel / exportar-word.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.admin_user = get_user_model().objects.create_superuser(
+            username="admin-descargas", email="admin-descargas@example.com", password="test-pass",
+        )
+
+    def setUp(self):
+        self.client.force_login(self.admin_user)
+
+    def _accion(self, nombre_url, accion, seleccion):
+        return self.client.post(
+            reverse(nombre_url),
+            {"action": accion, "_selected_action": [str(pk) for pk in seleccion]},
+        )
+
+    def test_una_requisicion_baja_su_excel_oficial(self):
+        requisicion = self.create_requisicion(area_solicitante="Mantenimiento")
+        response = self._accion(
+            "admin:recruitment_requisicion_changelist", "descargar_excel_oficial", [requisicion.pk],
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(f"_{requisicion.pk}.xlsx", response["Content-Disposition"])
+        ws = openpyxl.load_workbook(io.BytesIO(b"".join(response.streaming_content))).active
+        self.assertEqual(ws["M4"].value, "Mantenimiento")
+
+    def test_varias_requisiciones_bajan_en_un_zip(self):
+        una = self.create_requisicion()
+        otra = self.create_requisicion(tipo=self.tipo_nueva, justificacion="Crecimiento del área.")
+        response = self._accion(
+            "admin:recruitment_requisicion_changelist", "descargar_excel_oficial", [una.pk, otra.pk],
+        )
+        self.assertEqual(response["Content-Type"], "application/zip")
+        with ZipFile(io.BytesIO(b"".join(response.streaming_content))) as paquete:
+            nombres = sorted(paquete.namelist())
+            self.assertEqual(len(nombres), 2)
+            self.assertTrue(any("FO-C0-CH-08" in n for n in nombres))  # Reemplazo
+            self.assertTrue(any("FO-C0-CH-01" in n for n in nombres))  # Nueva Posicion
+            self.assertIsNone(paquete.testzip())
+
+    def test_un_tipo_sin_plantilla_avisa_y_no_truena(self):
+        raro = TipoRequisicion.objects.create(name="Tipo sin plantilla")
+        requisicion = self.create_requisicion(tipo=raro)
+        response = self._accion(
+            "admin:recruitment_requisicion_changelist", "descargar_excel_oficial", [requisicion.pk],
+        )
+        self.assertEqual(response.status_code, 302)  # vuelve a la lista
+        avisos = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("No hay plantilla oficial" in aviso for aviso in avisos), avisos)
+
+    def test_un_descriptivo_baja_su_word_oficial(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion(), nombre_puesto="Soldador")
+        response = self._accion(
+            "admin:recruitment_descriptivopuesto_changelist", "descargar_word_oficial", [descriptivo.pk],
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Type"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        with ZipFile(io.BytesIO(b"".join(response.streaming_content))) as paquete:
+            self.assertIn("Soldador", paquete.read("word/document.xml").decode("utf-8"))
+
+    def test_varios_descriptivos_bajan_en_un_zip(self):
+        uno = self.crear_descriptivo(self.create_posicion(), nombre_puesto="Soldador")
+        otro = self.crear_descriptivo(self.create_posicion(), nombre_puesto="Pintor")
+        response = self._accion(
+            "admin:recruitment_descriptivopuesto_changelist", "descargar_word_oficial", [uno.pk, otro.pk],
+        )
+        self.assertEqual(response["Content-Type"], "application/zip")
+        with ZipFile(io.BytesIO(b"".join(response.streaming_content))) as paquete:
+            self.assertEqual(len(paquete.namelist()), 2)
+            self.assertTrue(all(n.endswith(".docx") for n in paquete.namelist()))
+
+    def test_las_acciones_aparecen_en_el_admin(self):
+        # Con la lista vacía el admin no dibuja la barra de acciones.
+        self.create_requisicion()
+        self.crear_descriptivo(self.create_posicion())
+        for nombre_url, accion in (
+            ("admin:recruitment_requisicion_changelist", "descargar_excel_oficial"),
+            ("admin:recruitment_descriptivopuesto_changelist", "descargar_word_oficial"),
+        ):
+            with self.subTest(accion=accion):
+                self.assertContains(self.client.get(reverse(nombre_url)), f'value="{accion}"')
+
+
+class AdminListasPorTipoTests(RecruitmentTestDataMixin, TestCase):
+    """
+    El admin muestra Reemplazo y Nueva Posición como dos listas separadas
+    (modelos proxy sobre la misma tabla), cada una con su formulario oficial.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.admin_user = get_user_model().objects.create_superuser(
+            username="admin-listas", email="admin-listas@example.com", password="test-pass",
+        )
+        cls.reemplazo = cls.create_requisicion(tipo=cls.tipo_reemplazo, area_solicitante="De reemplazo")
+        cls.nueva = cls.create_requisicion(
+            tipo=cls.tipo_nueva, justificacion="Crecimiento.", area_solicitante="De nueva posición",
+        )
+
+    def setUp(self):
+        self.client.force_login(self.admin_user)
+
+    def _ids_de_la_lista(self, nombre_url):
+        respuesta = self.client.get(reverse(nombre_url))
+        self.assertEqual(respuesta.status_code, 200)
+        return {str(o.pk) for o in respuesta.context["cl"].queryset}
+
+    def _datos_alta(self, posicion, **extra):
+        return {
+            "posicion": str(posicion.pk), "estado": str(self.estado_borrador.pk), "fecha_solicitud": "2026-02-01",
+            "aprobaciones-TOTAL_FORMS": "0", "aprobaciones-INITIAL_FORMS": "0",
+            "aprobaciones-MIN_NUM_FORMS": "0", "aprobaciones-MAX_NUM_FORMS": "1000",
+            **extra,
+        }
+
+    def test_cada_lista_muestra_solo_su_tipo_y_la_general_muestra_todas(self):
+        self.assertEqual(self._ids_de_la_lista("admin:recruitment_requisicionreemplazo_changelist"), {str(self.reemplazo.pk)})
+        self.assertEqual(self._ids_de_la_lista("admin:recruitment_requisicionnuevaposicion_changelist"), {str(self.nueva.pk)})
+        self.assertEqual(
+            self._ids_de_la_lista("admin:recruitment_requisicion_changelist"), {str(self.reemplazo.pk), str(self.nueva.pk)},
+        )
+
+    def test_las_listas_tambien_muestran_las_borradas_para_poder_auditarlas(self):
+        self.reemplazo.deleted_by = self.admin_user
+        self.reemplazo.delete()
+        self.assertIn(str(self.reemplazo.pk), self._ids_de_la_lista("admin:recruitment_requisicionreemplazo_changelist"))
+
+    def test_un_registro_no_se_alcanza_desde_la_lista_del_otro_tipo(self):
+        url = reverse("admin:recruitment_requisicionreemplazo_change", args=[self.nueva.pk])
+        respuesta = self.client.get(url)
+        self.assertEqual(respuesta.status_code, 302)  # el admin lo trata como "no existe"
+        propia = reverse("admin:recruitment_requisicionreemplazo_change", args=[self.reemplazo.pk])
+        self.assertEqual(self.client.get(propia).status_code, 200)
+
+    def test_alta_en_la_lista_de_reemplazo_pone_el_tipo_sola_y_no_pide_justificacion(self):
+        posicion = self.create_posicion()
+        respuesta = self.client.post(
+            reverse("admin:recruitment_requisicionreemplazo_add"), self._datos_alta(posicion),
+        )
+        self.assertEqual(respuesta.status_code, 302, getattr(respuesta, "context", None) and respuesta.context["adminform"].form.errors)
+        creada = Requisicion.objects.get(posicion=posicion)
+        self.assertEqual(creada.tipo, self.tipo_reemplazo)
+        self.assertEqual(creada.created_by, self.admin_user)
+
+    def test_alta_en_la_lista_de_nueva_posicion_exige_justificacion(self):
+        posicion = self.create_posicion()
+        url = reverse("admin:recruitment_requisicionnuevaposicion_add")
+
+        sin = self.client.post(url, self._datos_alta(posicion))
+        self.assertEqual(sin.status_code, 200)  # vuelve al formulario con el error
+        self.assertIn("justificacion", sin.context["adminform"].form.errors)
+        self.assertFalse(Requisicion.objects.filter(posicion=posicion).exists())
+
+        con = self.client.post(url, self._datos_alta(posicion, justificacion="Se abre un segundo turno."))
+        self.assertEqual(con.status_code, 302)
+        creada = Requisicion.objects.get(posicion=posicion)
+        self.assertEqual(creada.tipo, self.tipo_nueva)
+        self.assertEqual(creada.justificacion, "Se abre un segundo turno.")
+
+    def test_el_tipo_no_se_puede_cambiar_desde_la_lista_de_un_tipo(self):
+        url = reverse("admin:recruitment_requisicionreemplazo_change", args=[self.reemplazo.pk])
+        datos = self._datos_alta(self.reemplazo.posicion, tipo=str(self.tipo_nueva.pk), area_solicitante="Editada")
+        datos["aprobaciones-INITIAL_FORMS"] = "0"
+        respuesta = self.client.post(url, datos)
+        self.assertEqual(respuesta.status_code, 302)
+        self.reemplazo.refresh_from_db()
+        self.assertEqual(self.reemplazo.area_solicitante, "Editada")
+        self.assertEqual(self.reemplazo.tipo, self.tipo_reemplazo)  # el tipo que llegó en el POST se ignora
+
+    def test_cada_lista_baja_su_formulario_oficial(self):
+        for nombre_url, requisicion, codigo in (
+            ("admin:recruitment_requisicionreemplazo_changelist", self.reemplazo, "FO-C0-CH-08"),
+            ("admin:recruitment_requisicionnuevaposicion_changelist", self.nueva, "FO-C0-CH-01"),
+        ):
+            with self.subTest(formulario=codigo):
+                respuesta = self.client.post(
+                    reverse(nombre_url),
+                    {"action": "descargar_excel_oficial", "_selected_action": [str(requisicion.pk)]},
+                )
+                self.assertEqual(respuesta.status_code, 200)
+                self.assertIn(codigo, respuesta["Content-Disposition"])
+
+    def test_sin_el_tipo_en_el_catalogo_no_se_ofrece_crear_en_esa_lista(self):
+        # Una base nueva sin el catálogo de tipos (la sábana aún no se importa)
+        # no debe romper la pantalla de alta: simplemente no se permite crear.
+        from apps.recruitment.admin import RequisicionNuevaPosicionAdmin
+
+        with mock.patch.object(RequisicionNuevaPosicionAdmin, "codigo_tipo", "tipo-que-no-existe"):
+            respuesta = self.client.get(reverse("admin:recruitment_requisicionnuevaposicion_add"))
+        self.assertEqual(respuesta.status_code, 403)
+        # Con el tipo presente, la misma pantalla sí abre.
+        self.assertEqual(self.client.get(reverse("admin:recruitment_requisicionnuevaposicion_add")).status_code, 200)

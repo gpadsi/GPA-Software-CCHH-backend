@@ -21,6 +21,7 @@ DJANGO_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.postgres",                     # unaccent: busqueda sin acentos
 ]
 
 THIRD_PARTY_APPS = [
@@ -111,6 +112,10 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- DRF ---
+# Sin esto el navegador esconde Content-Disposition a la app web y no puede
+# leer el nombre del archivo en las descargas oficiales (Excel y Word).
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -118,9 +123,15 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
+        # ?search= (sin acentos) y ?ordering= -- ambos inertes salvo que la
+        # vista declare search_fields / ordering_fields (ver apps/core/filters.py).
+        "apps.core.filters.AccentInsensitiveSearchFilter",
+        "apps.core.filters.SafeOrderingFilter",
     ],
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.StandardPagination",
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # Borrar algo en uso responde 409 con el motivo, no 500 (apps/core/exceptions.py).
+    "EXCEPTION_HANDLER": "apps.core.exceptions.api_exception_handler",
 }
 
 # --- drf-spectacular (OpenAPI 3.0) ---
@@ -240,7 +251,7 @@ JAZZMIN_SETTINGS = {
     # Orden de las secciones en el sidebar — se va ampliando conforme se
     # agreguen apps de dominio (Persona, Puesto, ...).
     "order_with_respect_to": [
-        "users", "persons", "employment", "schedules", "positions", "locations",
+        "users", "persons", "employment", "schedules", "positions", "recruitment", "locations",
         "organizations", "core", "imports", "auth",
     ],
     "icons": {
@@ -266,6 +277,11 @@ JAZZMIN_SETTINGS = {
         "persons.escolaridad": "fas fa-graduation-cap",
         "persons.tiposangre": "fas fa-tint",
         "positions.posicion": "fas fa-briefcase",
+        "recruitment": "fas fa-user-plus",
+        "recruitment.requisicion": "fas fa-clipboard-list",
+        "recruitment.requisicionreemplazo": "fas fa-people-arrows",
+        "recruitment.requisicionnuevaposicion": "fas fa-user-plus",
+        "recruitment.descriptivopuesto": "fas fa-file-alt",
         "positions.puesto": "fas fa-id-badge",
         "positions.alcancedeposicion": "fas fa-bullseye",
         "positions.tipoposicion": "fas fa-clipboard-list",

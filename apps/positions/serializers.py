@@ -2,6 +2,7 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoVa
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
+from apps.core.serializers import validar_nombre_sin_repetir
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
@@ -58,7 +59,9 @@ class TipoPosicionSerializer(serializers.ModelSerializer):
 class TipoRequisicionSerializer(serializers.ModelSerializer):
     class Meta:
         model = TipoRequisicion
-        fields = ["id", "code", "name", "is_active"]
+        # requiere_justificacion: el front lo usa para marcar la justificación
+        # como obligatoria sin esperar a que el servidor la rechace.
+        fields = ["id", "code", "name", "is_active", "requiere_justificacion"]
         read_only_fields = fields
 
 
@@ -72,15 +75,23 @@ class EstatusPosicionSerializer(serializers.ModelSerializer):
 class PuestoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Puesto
-        fields = ["id", "code", "name", "is_active"]
-        read_only_fields = fields
+        fields = ["id", "code", "name", "is_active", "es_gerencia_de_unidad"]
+        # El código se genera solo al crear y ya no cambia: lo usan las
+        # importaciones para reconocer el puesto, aunque se renombre.
+        read_only_fields = ["id", "code"]
+
+    def validate_name(self, value):
+        return validar_nombre_sin_repetir(Puesto, self.instance, value, "un puesto")
 
 
 class PosicionSerializer(FullCleanModelSerializer):
+    # Solo lectura: cómo nombrarla a una persona ("Puesto — Unidad (Área)").
+    etiqueta = serializers.CharField(read_only=True)
+
     class Meta:
         model = Posicion
         fields = [
-            "id", "organization_node", "area", "puesto", "reports_to", "supervision_texto",
+            "id", "etiqueta", "organization_node", "area", "puesto", "reports_to", "supervision_texto",
             "alcance", "tipo_posicion", "tipo_requisicion", "estatus", "genero_requerido",
             "fecha_registro_vacante", "fecha_autorizacion_vacante",
             "headhunter", "solicitante_vacante",

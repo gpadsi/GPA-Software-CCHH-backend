@@ -87,7 +87,10 @@ class Persona(BaseAuditModel):
     state = models.CharField(max_length=100, blank=True, verbose_name="Estado")
 
     def __str__(self):
-        return f"{self.last_name_paternal} {self.last_name_maternal} {self.first_name}".strip()
+        # Sin apellido materno (hay personas que no lo tienen) no queda un
+        # espacio doble entre los demás.
+        partes = (self.last_name_paternal, self.last_name_maternal, self.first_name)
+        return " ".join(parte for parte in partes if parte and parte.strip())
 
     class Meta:
         db_table = "persons_persona"

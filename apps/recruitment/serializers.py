@@ -1,5 +1,6 @@
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoValidationError
 from django.db import transaction
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
@@ -89,13 +90,30 @@ class AprobacionRequisicionSerializer(FullCleanModelSerializer):
         read_only_fields = ["id"]
 
 
+# Los únicos estados que el solicitante (cualquier usuario autenticado) puede
+# poner por sí mismo: empezar en Borrador y mandarla a autorización. Del resto
+# (Autorizada, En Reclutamiento, Cubierta...) se encarga Capital Humano -- el
+# permiso de crear es abierto a propósito, y la legitimidad la da el flujo de
+# aprobación, así que el solicitante no debe poder saltárselo autorizándose.
+ESTADOS_QUE_ELIGE_EL_SOLICITANTE = ("borrador", "pendiente-de-autorizacion")
+
+
 class RequisicionSerializer(FullCleanModelSerializer):
+    # Opcional: si no se manda, empieza en Borrador.
+    estado = serializers.PrimaryKeyRelatedField(queryset=EstadoRequisicion.objects.all(), required=False)
     aprobaciones = AprobacionRequisicionSerializer(many=True, read_only=True)
+    # Solo lectura. La etiqueta evita que cada fila de una lista tenga que ir a
+    # buscar el nombre de su Posición; `creado_por` deja al front saber si la
+    # cuenta es la dueña (puede editarla) sin repetir esa regla; `solicitante`
+    # es null en las requisiciones importadas, que no las levantó nadie.
+    posicion_etiqueta = serializers.CharField(source="posicion.etiqueta", read_only=True)
+    creado_por = serializers.PrimaryKeyRelatedField(source="created_by", read_only=True)
+    solicitante = serializers.SerializerMethodField()
 
     class Meta:
         model = Requisicion
         fields = [
-            "id", "posicion", "tipo", "estado",
+            "id", "posicion", "posicion_etiqueta", "tipo", "estado", "creado_por", "solicitante",
             "fecha_solicitud", "fecha_a_cubrir_vacante", "fecha_entrega_a_capital_humano",
             "area_solicitante", "justificacion",
             "horario_a_cubrir", "idiomas_requeridos", "disposicion_viajar",
@@ -105,6 +123,29 @@ class RequisicionSerializer(FullCleanModelSerializer):
             "aprobaciones",
         ]
         read_only_fields = ["id"]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        es_gestor = request is not None and es_gestion_rrhh(request.user)
+        estado = attrs.get("estado")
+        if self.instance is None and estado is None:
+            estado = EstadoRequisicion.objects.filter(code=ESTADOS_QUE_ELIGE_EL_SOLICITANTE[0]).first()
+            if estado is None:
+                raise serializers.ValidationError({"estado": "Falta el estado inicial «Borrador» en el catálogo."})
+            attrs["estado"] = estado
+        cambia = estado is not None and (self.instance is None or estado.pk != self.instance.estado_id)
+        if cambia and not es_gestor and estado.code not in ESTADOS_QUE_ELIGE_EL_SOLICITANTE:
+            raise serializers.ValidationError({
+                "estado": "Solo Capital Humano puede poner una requisición en este estado: "
+                          "tú puedes dejarla en Borrador o mandarla a autorización."
+            })
+        return attrs
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_solicitante(self, requisicion):
+        usuario = requisicion.created_by
+        return (usuario.get_full_name() or usuario.username) if usuario else None
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +208,12 @@ class ConformidadDescriptivoSerializer(FullCleanModelSerializer):
     # campo que aparece en una UniqueConstraint, y aquí `persona` es opcional
     # (solo el rol Colaborador la exige, y eso lo valida el modelo).
     persona = serializers.PrimaryKeyRelatedField(queryset=Persona.objects.all(), required=False, allow_null=True)
+    # Solo lectura: para mostrar a quién pertenece sin otra consulta por fila.
+    persona_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = ConformidadDescriptivo
-        fields = ["id", "descriptivo", "rol", "persona", "fecha", "usuario", "nombre_manual"]
+        fields = ["id", "descriptivo", "rol", "persona", "persona_nombre", "fecha", "usuario", "nombre_manual"]
         read_only_fields = ["id"]
         # DRF arma un UniqueTogetherValidator por cada UniqueConstraint
         # IGNORANDO su condición: el de (descriptivo, rol) bloquearía que dos
@@ -179,6 +222,10 @@ class ConformidadDescriptivoSerializer(FullCleanModelSerializer):
         # (persona nula / no borrado) y devuelve el mismo error, así que la
         # unicidad se valida ahí.
         validators = []
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_persona_nombre(self, conformidad):
+        return str(conformidad.persona) if conformidad.persona_id else None
 
     def validate(self, attrs):
         # Una conformidad pertenece a UNA versión: moverla a otra
@@ -205,10 +252,12 @@ class DescriptivoPuestoSerializer(FullCleanModelSerializer):
     conformidades = ConformidadDescriptivoSerializer(many=True, read_only=True)
     esta_congelado = serializers.BooleanField(read_only=True)
 
+    posicion_etiqueta = serializers.CharField(source="posicion.etiqueta", read_only=True)
+
     class Meta:
         model = DescriptivoPuesto
         fields = [
-            "id", "posicion", "version", "congelado_en", "esta_congelado",
+            "id", "posicion", "posicion_etiqueta", "version", "congelado_en", "esta_congelado",
             "nombre_puesto", "empresa", "area_departamento", "reporta_a", "supervisa_a", "fecha_elaboracion",
             "edad", "edad_otro", "disponibilidad_viajar",
             "dias_por_laborar", "dias_por_laborar_otro", "horario", "horario_otro",

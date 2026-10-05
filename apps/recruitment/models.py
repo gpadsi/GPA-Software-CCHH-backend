@@ -155,6 +155,32 @@ class Requisicion(SoftDeleteModel):
         verbose_name_plural = "Requisiciones"
 
 
+class RequisicionReemplazo(Requisicion):
+    """
+    Solo para el admin de Django (modelo proxy, no crea tabla): las
+    Requisiciones de tipo Reemplazo en su propia lista, igual que su
+    formulario oficial (FO-C0-CH-08). Es la misma tabla que Requisicion.
+    """
+
+    class Meta:
+        proxy = True
+        verbose_name = "Requisición de Reemplazo"
+        verbose_name_plural = "Requisiciones de Reemplazo"
+
+
+class RequisicionNuevaPosicion(Requisicion):
+    """
+    Solo para el admin de Django (modelo proxy, no crea tabla): las
+    Requisiciones de tipo Nueva Posición en su propia lista, igual que su
+    formulario oficial (FO-C0-CH-01). Es la misma tabla que Requisicion.
+    """
+
+    class Meta:
+        proxy = True
+        verbose_name = "Requisición de Nueva Posición"
+        verbose_name_plural = "Requisiciones de Nueva Posición"
+
+
 class AprobacionRequisicion(SoftDeleteModel):
     """
     Una de las 4 firmas de una Requisición. Cubre los dos casos reales

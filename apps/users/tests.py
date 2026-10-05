@@ -43,3 +43,33 @@ class MeViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["username"], "me-view-user")
         self.assertEqual(response.data["email"], "me-view@example.com")
+
+    def _me(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get(reverse("user-me")).data
+
+    def test_me_exposes_the_role_and_that_a_colaborador_cannot_manage(self):
+        data = self._me(self.user)
+        self.assertEqual(dict(data["role"]), {"code": "colaborador", "name": "Colaborador"})
+        self.assertFalse(data["can_manage_hr"])
+
+    def test_me_says_capital_humano_and_admin_can_manage(self):
+        for code in ("capital-humano", "admin"):
+            with self.subTest(role=code):
+                usuario = User.objects.create_user(
+                    username=f"me-{code}", email=f"me-{code}@example.com",
+                    password="strong-test-password", role=UserRole.objects.get(code=code),
+                )
+                data = self._me(usuario)
+                self.assertEqual(data["role"]["code"], code)
+                self.assertTrue(data["can_manage_hr"])
+
+    def test_me_for_an_account_without_role_has_null_role_and_cannot_manage(self):
+        # Un superusuario sin rol tampoco puede escribir en la API: es_gestion_rrhh
+        # exige el rol, no is_superuser. El front debe verlo igual que la API.
+        sin_rol = User.objects.create_superuser(
+            username="me-sin-rol", email="me-sin-rol@example.com", password="strong-test-password",
+        )
+        data = self._me(sin_rol)
+        self.assertIsNone(data["role"])
+        self.assertFalse(data["can_manage_hr"])

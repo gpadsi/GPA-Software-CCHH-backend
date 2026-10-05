@@ -696,6 +696,33 @@ class OrganizationAPITests(OrganizationTestDataMixin, APITestCase):
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(OrganizationNode.objects.filter(pk=node.pk).exists())
 
+    def test_deleting_a_node_that_is_still_in_use_answers_409_with_the_reason(self):
+        # Antes esto era un 500 (ProtectedError sin atrapar): el front solo
+        # podia decir "algo fallo". Ahora dice que lo esta usando.
+        raiz = self.create_valid_node(level_code="empresa", code="GPA-RAIZ", name="Raiz")
+        hijo = self.create_valid_node(
+            level_code="unidad_organizacional", code="GPA-UO-1", name="Hijo", parent=raiz,
+        )
+        url = reverse("organizationnode-detail", args=[raiz.pk])
+
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "protected")
+        self.assertIn("1 Nodo organizacional", response.data["detail"])
+        self.assertTrue(OrganizationNode.objects.filter(pk=raiz.pk).exists())
+
+        # Con varios, el nombre va en plural.
+        self.create_valid_node(level_code="unidad_organizacional", code="GPA-UO-2", name="Hijo 2", parent=raiz)
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("2 Nodos organizacionales", response.data["detail"])
+
+        # El conflicto no deja la sesion de base de datos rota: la siguiente
+        # peticion funciona y, ya sin hijos ni referencias, el borrado procede.
+        self.assertEqual(self.client.delete(reverse("organizationnode-detail", args=[hijo.pk])).status_code, 204)
+        OrganizationNode.objects.filter(parent=raiz).delete()
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_204_NO_CONTENT)
+
     def test_company_crud_and_user_audit(self):
         company_node = self.create_valid_node(
             level_code="empresa",
@@ -746,6 +773,52 @@ class OrganizationAPITests(OrganizationTestDataMixin, APITestCase):
         delete_response = self.client.delete(detail_url)
         self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Company.objects.filter(pk=company.pk).exists())
+
+    def test_companies_with_blank_legal_data_are_stored_as_pending_not_as_empty_text(self):
+        # rfc es unico: dos empresas con "" chocarian aunque ambas esten
+        # "pendientes". Cualquier vacio se guarda como NULL, igual que los
+        # datos reales que GPA aun no confirma.
+        list_url = reverse("company-list")
+        for indice in (1, 2):
+            nodo = self.create_valid_node(
+                level_code="empresa", code=f"GPA-PEND-{indice}", name=f"Empresa pendiente {indice}",
+            )
+            response = self.client.post(
+                list_url,
+                {"organization_node": str(nodo.pk), "legal_name": "", "rfc": "  ", "employer_registration": ""},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+            company = Company.objects.get(pk=response.data["id"])
+            self.assertIsNone(company.legal_name)
+            self.assertIsNone(company.rfc)
+            self.assertIsNone(company.employer_registration)
+
+    def test_two_companies_cannot_share_a_real_rfc(self):
+        list_url = reverse("company-list")
+        primero = self.create_valid_node(level_code="empresa", code="GPA-RFC-1", name="Empresa RFC 1")
+        segundo = self.create_valid_node(level_code="empresa", code="GPA-RFC-2", name="Empresa RFC 2")
+        ok = self.client.post(
+            list_url, {"organization_node": str(primero.pk), "rfc": "AAA010101AA1"}, format="json",
+        )
+        self.assertEqual(ok.status_code, status.HTTP_201_CREATED)
+        repetido = self.client.post(
+            list_url, {"organization_node": str(segundo.pk), "rfc": "AAA010101AA1"}, format="json",
+        )
+        self.assertEqual(repetido.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("rfc", repetido.data)
+
+    def test_a_node_code_cannot_repeat_under_the_same_parent(self):
+        raiz = self.create_valid_node(level_code="empresa", code="GPA-DUP", name="Raiz")
+        self.create_valid_node(level_code="unidad_organizacional", code="COD-1", name="Uno", parent=raiz)
+        response = self.client.post(
+            reverse("organizationnode-list"),
+            {"level": self.levels["unidad_organizacional"].pk, "parent": str(raiz.pk), "code": "COD-1", "name": "Dos"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # La forma del error la usa el front para explicarlo con claridad.
+        self.assertIn("non_field_errors", response.data)
 
     def test_node_api_returns_400_for_an_invalid_numeric_level_order(self):
         company_node = self.create_valid_node(

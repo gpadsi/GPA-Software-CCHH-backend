@@ -127,11 +127,38 @@ secciones placeholder (Licencias, Reclutamiento, Desempeño, Tiempo, Buzz
 (animación de entrada en el Dashboard, accesibilidad, sin jank
 detectable). 91 pruebas automatizadas, `flutter analyze` limpio.
 
+**Diferido por el usuario (2026-10-05), no empezar sin que lo pida:** la vista
+de tarjetas en móvil. Debajo de 640 px las tablas se desplazan en horizontal y
+los íconos de acción de cada fila (ver, editar, eliminar) quedan fuera de
+pantalla; la solución prevista es mostrar cada fila como una tarjeta con sus
+acciones visibles. Afecta a todas las pantallas con tabla.
+
 **Pendiente de construir cuando el usuario lo confirme** (anotado
 2026-10-01, no empezar sin esa confirmación): un apartado para filtrar
 por Puesto en el front — ligado a `HistorialPuesto` (backend, rama
 `blindaje-historial-laboral-pablo`), que hoy solo guarda el historial sin
 que nada en el front ni la API lo consuma todavía.
+
+**Mejoras del front del 2026-10-02 y el 2026-10-05** (después de las 8 fases;
+312 pruebas, ya no son 91): *fundamentos de diseño* (una sola confirmación de borrado,
+formularios en panel lateral, esqueleto con brillo, una sola transición de
+página, paleta más profunda "vino", sin modo oscuro), *búsqueda y orden en
+tablas* (en el servidor en 8 listas, en el cliente en Puestos y Tipos de
+horario) y el *paso 2*: el front conoce el rol (`SessionUser.canManageHr`, que
+manda el servidor) y NO muestra botones de escritura a quien la API rechazaría
+(un Colaborador ve todo en solo lectura); y Empleados (alta con buscador de
+persona en el servidor, edición del número de nómina), Puestos y Tipos de
+horario (crear, editar, desactivar), Empresas (crear con su nodo, editar datos
+legales) y Organigrama (agregar unidad dentro de un nodo, editar, eliminar)
+dejaron de ser de solo lectura. Un borrado bloqueado muestra el motivo que da
+el servidor. **No se hizo a propósito:** borrar Empleados (la baja es cerrar el
+contrato, y "Eliminar" invitaría a usarlo como si lo fuera), borrar
+Puestos/Tipos de horario, borrar Empresas, y mover un nodo a otro padre o
+cambiarle el nivel. **Sigue pendiente:** pantallas de Contrato (alta, baja,
+reingreso), historial salarial y adjuntos; la vista de tarjetas en móvil (<640 px los
+íconos de acción de cada fila quedan fuera de pantalla); ocultar del menú lo
+que un Colaborador no puede usar (hoy solo se ocultan los botones de
+escritura); y que `/users/me/` traiga el id del Empleado de la cuenta.
 
 ## 4. Lo que falta por DATO (esperando a GPA, no es trabajo de programar)
 
@@ -281,7 +308,111 @@ resultado en Microsoft Word y renderizándolo a PDF. **Decisión abierta:**
 una fila sin dato conserva su texto guía, y las responsabilidades 2 y 3 lo
 traen como ejemplos ("Ejemplo de redacción correcta/incorrecta") que se
 imprimirían; si se prefiere dejar en blanco las filas sin dato, es un
-cambio chico. 299 pruebas en el proyecto.
+cambio chico.
+Descarga desde el back sin frontend ni token (2026-10-02): el admin de
+Django tiene la acción "Descargar Excel oficial" en Requisiciones y
+"Descargar Word oficial" en Descriptivos de puesto (un archivo si se
+selecciona uno, un ZIP si se seleccionan varios; lo que no se pueda generar
+avisa en vez de tronar). Mismos archivos que `exportar-excel` /
+`exportar-word` de la API. Excel verificado también abriéndolo en Microsoft
+Excel. Archivos de ejemplo (uno real, tres de demostración) en
+`docs/ejemplos_exportados/` (carpeta ignorada por git).
+Listas separadas por tipo en el admin (2026-10-02): "Requisiciones de
+Reemplazo" y "Requisiciones de Nueva Posición" son dos listas (modelos
+proxy `RequisicionReemplazo` / `RequisicionNuevaPosicion`, misma tabla, sin
+datos duplicados), cada una con su formulario oficial (FO-C0-CH-08 /
+FO-C0-CH-01). El tipo se pone solo al crear y no se puede cambiar desde esa
+lista (cambiarlo movería la requisición a la otra lista y a otro
+formulario); "Requisiciones" sigue mostrando todas, de cualquier tipo, para
+auditar. La justificación sigue siendo obligatoria solo en Nueva Posición.
+Hoy: 39 de Reemplazo y 0 de Nueva Posición (las 29 posiciones de ese tipo
+no se migraron por no tener justificación). Los modelos proxy crean sus
+propios permisos de Django: un usuario de admin que NO sea superusuario
+necesitaría que se los asignen.
+
+**Búsqueda y orden en las listas (2026-10-02, para las tablas del front):**
+`?search=` y `?ordering=` en 10 listas — Personas, Empleados, Posiciones,
+Empresas, Ubicaciones, Naves, Áreas, Catorcenas y las dos Asignaciones. La
+búsqueda ignora mayúsculas y acentos ("perez" encuentra "Pérez") con la
+extensión `unaccent` de PostgreSQL (migración `core.0007`, "trusted" desde
+PG13: no pide superusuario) y se combina por palabras (todas deben aparecer).
+Solo busca y ordena por lo que la tabla muestra: NSS/RFC no se buscan ni se
+ordenan. **Seguridad:** el `OrderingFilter` de DRF, sin `ordering_fields`,
+deja ordenar por CUALQUIER campo del serializer (ordenar por un campo permite
+inferir su contenido aunque no se muestre); aquí una vista que no declara sus
+campos simplemente ignora `?ordering=` (`SafeOrderingFilter`). El orden agrega
+`pk` como desempate para que paginar una columna con valores repetidos no
+repita ni se salte filas. La búsqueda corre DESPUÉS del filtro por dueño, así
+que un Colaborador solo encuentra lo suyo. El esquema OpenAPI anuncia los dos
+parámetros solo en las 10 vistas que los soportan. Puestos y Tipos de horario
+(catálogos que el front recibe completos) se buscan y ordenan en el cliente.
+331 pruebas en el proyecto.
+
+**Rol y escritura desde el front (2026-10-02, paso 2 del plan del front):**
+`/users/me/` ahora trae `role` (`{code, name}`, o null si la cuenta no tiene
+rol) y `can_manage_hr` (true para Capital Humano y Admin). Sale de la misma
+función que usa la API para decidir si dejar escribir (`es_gestion_rrhh`), así
+el front no repite la regla; una cuenta sin rol (p. ej. un superusuario recién
+creado) recibe false y la API tampoco le deja escribir. **Puestos y Tipos de
+horario** pasaron de solo lectura a crear/editar para Capital Humano/Admin
+(`EditableCatalogViewSet`, `apps/core/viewsets.py`); NO se borran, porque hay
+Posiciones y Asignaciones que los usan: lo que ya no se ocupa se desactiva con
+`is_active`. El código se genera solo al crear y ya no cambia (solo lectura:
+las importaciones lo usan para reconocer el puesto), y el nombre no puede
+repetirse (sin distinguir mayúsculas) al crear o al renombrar. El serializer de
+Puesto ahora expone `es_gerencia_de_unidad`: es el interruptor que el propio
+modelo dice que RH marca a mano cuando GPA confirme qué puesto es "cabeza de la
+unidad" (quien lo ocupe pasa a ser jefe de toda su unidad); sigue en false para
+todos los puestos. **Hallazgo:** borrar algo que otro registro usa (FK
+`PROTECT`) respondía **500** — verificado contra datos reales con un nodo con
+hijos y una posición con contrato. Ahora responde **409** con el motivo
+("No se puede eliminar porque todavía está en uso por: 4 Nodos
+organizacionales, 1 Posición…", `apps/core/exceptions.py`, configurado como
+`EXCEPTION_HANDLER`). Otro hallazgo: `Company.rfc` y `Empleado.work_number` son
+únicos y opcionales, y un vacío `""` chocaba con otro vacío; ahora cualquier
+vacío se guarda como NULL (`vacio_como_nulo`), igual que los datos reales
+(razón social y registro patronal también). 348 pruebas en el proyecto.
+
+**Pantallas de Reclutamiento en el front (2026-10-05, paso 3 del plan del
+front):** `/reclutamiento` ya no es un marcador. Dos pestañas: **Requisiciones**
+(lista con búsqueda, orden y filtros por estado y tipo; alta y edición en
+panel; detalle con solicitud, perfil, compensación, suspensión y las cuatro
+firmas de aprobación; descarga del Excel oficial) y **Descriptivos de puesto**
+(lista con filtro Borradores/Congelados; alta de un borrador desde una
+Posición; editor de página completa con las secciones del FO-C0-CH-04;
+congelar, copiar a un borrador nuevo, descarga del Word oficial y
+conformidades). Cualquier cuenta puede levantar una requisición y ve solo las
+suyas; Capital Humano y Admin ven todas, registran las aprobaciones y editan
+los descriptivos; un Colaborador consulta y descarga los descriptivos.
+Decisiones y cambios del back que salieron de esto: **(1) hueco de
+autorización cerrado:** `Requisicion.estado` no tenía restricción y cualquier
+solicitante podía poner su propia requisición en «Autorizada» por la API; ahora
+solo Capital Humano/Admin elige cualquier estado y el resto solo Borrador o
+Pendiente de Autorización (si no manda estado, empieza en Borrador;
+`ESTADOS_QUE_ELIGE_EL_SOLICITANTE`). **(2)** Posición, Requisición y Descriptivo
+traen `etiqueta` / `posicion_etiqueta` ("Puesto — Unidad (Área)"), armada con
+`select_related` (una Posición no tiene nombre propio), `solicitante` y
+`creado_por` para saber quién la levantó y si la cuenta puede editarla;
+`TipoRequisicion` expone `requiere_justificacion`; las conformidades traen
+`persona_nombre`. **(3)** Requisiciones filtran por posición/estado/tipo y
+buscan/ordenan solo por lo que muestra la tabla (la búsqueda de un Colaborador
+corre después del filtro por dueño, no encuentra las ajenas); Descriptivos
+buscan/ordenan por nombre, empresa, área, versión y fechas. **(4)**
+`CORS_EXPOSE_HEADERS = ["Content-Disposition"]`: sin él el navegador esconde el
+nombre oficial del archivo en las descargas. **(5)** `Persona.__str__` dejaba un
+espacio doble sin apellido materno ("Torres  Ana"), que llegaba al nombre del
+jefe y a la celda del Excel; tres pruebas viejas daban por bueno ese defecto.
+En el front: filtros por campo en `TableQuery`, campo de fecha, campo de texto
+multilínea/solo lectura, selector con búsqueda en el servidor reutilizable
+(`SearchPickerField`; el de personas ahora lo usa), descarga de archivos en web
+con Blob (`core/files`, nueva dependencia directa `web`) y el nombre del
+archivo tomado del servidor. La tabla de requisiciones pone tipo y área bajo la
+posición: con siete columnas los íconos de acción quedaban fuera de pantalla.
+**No se hizo a propósito:** exportar desde la lista, aprobar desde la cuenta de
+quien aprueba (hoy Capital Humano captura cada firma, digital o física), avisar
+de cambios sin guardar al salir del editor, ni nada de Candidatos (pospuesto).
+Pendiente heredado: la vista de tarjetas en móvil. 361 pruebas del back y 312
+del front.
 
 **Reutiliza sin tocar:** `Posicion.tipo_requisicion`/`estatus` (ya traen
 Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
@@ -362,7 +493,9 @@ Vacante Pendiente/Activa/Suspendida/Eliminada), `headhunter`,
 (incluye el export a Excel y el fix de nginx)~~ — **completa (2026-10-01)**
 → 2) ~~Descriptivo de Puesto versionado~~ — **completa (2026-10-02)**
 (modelos, API/permisos y export a Word) → 3) Candidatos
-(opcional, ligero: nombre/contacto/etapa/notas/CV vía `Attachment`).
+(opcional, ligero: nombre/contacto/etapa/notas/CV vía `Attachment`) —
+**pospuesto por decisión del usuario (2026-10-02)**: se retoma más adelante,
+no empezar sin que lo pida.
 
 Falta solo el frontend: hoy todo esto se usa desde el admin de Django o
 directo contra la API — el placeholder "Reclutamiento" del sidebar sigue

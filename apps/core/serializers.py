@@ -6,6 +6,33 @@ from rest_framework import serializers
 from apps.core.models import Attachment
 
 
+def vacio_como_nulo(value):
+    """
+    Un dato opcional y UNICO (RFC, número de nómina) que llega vacío se guarda
+    como NULL, no como "": dos registros con "" chocarían entre sí en la
+    restricción de unicidad aunque ambos estén simplemente «pendientes».
+    """
+    return value.strip() or None if value else None
+
+
+def validar_nombre_sin_repetir(modelo, instancia, nombre, descripcion):
+    """
+    Impide dar de alta (o renombrar a) un valor de catálogo que ya existe con
+    el mismo nombre, sin distinguir mayúsculas. El nombre no es único en la
+    base a propósito (hay datos reales con variantes que RH normaliza poco a
+    poco), así que esto solo se revisa al crear o al cambiar el nombre: editar
+    otro campo de un valor ya repetido no debe quedar bloqueado.
+    """
+    if instancia is not None and instancia.name == nombre:
+        return nombre
+    repetidos = modelo.objects.filter(name__iexact=nombre)
+    if instancia is not None:
+        repetidos = repetidos.exclude(pk=instancia.pk)
+    if repetidos.exists():
+        raise serializers.ValidationError(f"Ya existe {descripcion} con ese nombre.")
+    return nombre
+
+
 class AttachmentSerializer(serializers.ModelSerializer):
     # WRITE-ONLY: nombre del modelo destino (ej. "persona", "puesto", ...)
     model_name = serializers.CharField(

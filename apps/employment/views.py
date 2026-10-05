@@ -100,6 +100,10 @@ class EmpleadoViewSet(viewsets.ModelViewSet):
     queryset = Empleado.objects.order_by("pk")
     serializer_class = EmpleadoSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
+    search_fields = [
+        "work_number", "persona__first_name", "persona__last_name_paternal", "persona__last_name_maternal",
+    ]
+    ordering_fields = ["work_number", "persona__last_name_paternal", "persona__last_name_maternal", "persona__first_name"]
 
     def get_queryset(self):
         return scope_to_own_unless_management(super().get_queryset(), self.request.user, "user")

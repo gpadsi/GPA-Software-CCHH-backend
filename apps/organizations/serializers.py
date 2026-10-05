@@ -2,6 +2,7 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoVa
 from rest_framework import serializers
 from rest_framework.settings import api_settings
 
+from apps.core.serializers import vacio_como_nulo
 from apps.organizations.models import (
     Company,
     OrganizationalLevel,
@@ -68,3 +69,14 @@ class CompanySerializer(FullCleanModelSerializer):
         model = Company
         fields = ["id", "organization_node", "legal_name", "rfc", "employer_registration"]
         read_only_fields = ["id"]
+
+    # `rfc` es único. Los datos reales usan NULL para lo que GPA aún no
+    # confirma, y aquí cualquier vacío se normaliza a ese mismo valor.
+    def validate_legal_name(self, value):
+        return vacio_como_nulo(value)
+
+    def validate_rfc(self, value):
+        return vacio_como_nulo(value)
+
+    def validate_employer_registration(self, value):
+        return vacio_como_nulo(value)

@@ -1,5 +1,6 @@
 import django_filters
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Prefetch
 from django.http import FileResponse
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import permissions, status, viewsets
@@ -91,9 +92,22 @@ class RequisicionViewSet(viewsets.ModelViewSet):
     Humano/Admin ve y administra todas; borrar (soft-delete) queda
     reservado a ellos.
     """
-    queryset = Requisicion.objects.order_by("-fecha_solicitud")
+    queryset = Requisicion.objects.select_related(
+        "posicion__puesto", "posicion__organization_node", "posicion__area", "tipo", "estado", "created_by",
+    ).prefetch_related("aprobaciones").order_by("-fecha_solicitud")
     serializer_class = RequisicionSerializer
     permission_classes = [IsOwnerOrGestionRRHH]
+    filterset_fields = ["posicion", "estado", "tipo"]
+    # Lo que muestra la tabla: puesto y unidad de la Posición, tipo, estado y
+    # el área que la pide. La búsqueda corre DESPUÉS del filtro por dueño
+    # (get_queryset), así que un Colaborador solo encuentra las suyas.
+    search_fields = [
+        "posicion__puesto__name", "posicion__organization_node__name", "area_solicitante",
+        "tipo__name", "estado__name",
+    ]
+    ordering_fields = [
+        "fecha_solicitud", "posicion__puesto__name", "tipo__name", "estado__name", "area_solicitante",
+    ]
 
     def get_queryset(self):
         return scope_to_own_unless_management(super().get_queryset(), self.request.user, "created_by")
@@ -184,12 +198,17 @@ class DescriptivoPuestoViewSet(viewsets.ModelViewSet):
     mientras es borrador; al congelarlo ("congelar") ya no se modifica ni se
     borra -- para cambiar algo se copia a un borrador nuevo ("copiar").
     """
-    queryset = DescriptivoPuesto.objects.select_related("posicion", "edad", "dias_por_laborar", "horario").prefetch_related(
-        "funciones", "indicadores", "competencias", "recursos", "conformidades",
+    queryset = DescriptivoPuesto.objects.select_related(
+        "posicion__puesto", "posicion__organization_node", "posicion__area", "edad", "dias_por_laborar", "horario",
+    ).prefetch_related(
+        "funciones", "indicadores", "competencias", "recursos",
+        Prefetch("conformidades", queryset=ConformidadDescriptivo.objects.select_related("persona")),
     ).order_by("posicion", "-version")
     serializer_class = DescriptivoPuestoSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
     filterset_class = DescriptivoPuestoFilter
+    search_fields = ["nombre_puesto", "empresa", "area_departamento"]
+    ordering_fields = ["nombre_puesto", "empresa", "version", "fecha_elaboracion", "congelado_en"]
 
     def _serializar(self, descriptivo):
         # Se vuelve a leer: las acciones devuelven el estado final con sus listas.
@@ -312,7 +331,7 @@ class ConformidadDescriptivoViewSet(viewsets.ModelViewSet):
     o física. El Colaborador todavía no puede aceptar por sí mismo desde su
     cuenta -- hoy es solo lectura en todo el sistema.
     """
-    queryset = ConformidadDescriptivo.objects.order_by("rol__name")
+    queryset = ConformidadDescriptivo.objects.select_related("persona").order_by("rol__name")
     serializer_class = ConformidadDescriptivoSerializer
     permission_classes = [IsCapitalHumanoOrAdmin]
     filterset_fields = ["descriptivo"]
