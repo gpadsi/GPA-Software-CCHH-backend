@@ -1,0 +1,4 @@
+# Los scripts de shell se ejecutan dentro de contenedores Linux: deben quedar con
+# finales de linea LF aunque Git para Windows tenga core.autocrlf=true.
+# (Con CRLF, "#!/bin/sh" no se encuentra y el contenedor entra en bucle de reinicios.)
+*.sh text eol=lf
