@@ -17,6 +17,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.employment.models import Contrato, Empleado
+from apps.locations.models import Area
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
 from apps.persons.models import Persona
 from apps.positions.models import EstatusPosicion, Posicion, Puesto, TipoRequisicion
@@ -2028,3 +2029,246 @@ class AdminListasPorTipoTests(RecruitmentTestDataMixin, TestCase):
         self.assertEqual(respuesta.status_code, 403)
         # Con el tipo presente, la misma pantalla sí abre.
         self.assertEqual(self.client.get(reverse("admin:recruitment_requisicionnuevaposicion_add")).status_code, 200)
+
+
+class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        user_model = get_user_model()
+        for atributo, rol in (
+            ("colaborador", "colaborador"), ("otro", "colaborador"),
+            ("gestor", "capital-humano"), ("administrador", "admin"),
+        ):
+            setattr(cls, atributo, user_model.objects.create_user(
+                username=f"selector-{atributo}", email=f"selector-{atributo}@example.com",
+                password="strong-test-password", role=UserRole.objects.get(code=rol),
+            ))
+        cls.puesto = Puesto.objects.create(name="Operador de Prueba")
+        cls.area = Area.objects.create(code="SELECTOR", name="Producción")
+        cls.estatus = {"vacante-activa": cls.estatus_vacante}
+        for code in (
+            "vacante-pendiente-de-confirmacion", "vacante-suspendida", "vacante-eliminada",
+            "colaborador-activo", "colaborador-baja", "trainee-activo", "trainee-baja",
+        ):
+            cls.estatus[code] = EstatusPosicion.objects.create(code=code, name=code)
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.colaborador)
+        self.url = reverse("posiciones-elegibles-list")
+
+    def _listar(self, para="requisicion", **params):
+        response = self.client.get(self.url, {"para": para, **params})
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return response.data
+
+    def test_para_es_obligatorio_y_solo_admite_los_dos_tramites(self):
+        for params in ({}, {"para": ""}, {"para": "otro"}):
+            with self.subTest(params=params):
+                response = self.client.get(self.url, params)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(str(response.data["para"]), "Indica para=requisicion o para=descriptivo.")
+
+    def test_un_anonimo_no_puede_consultar(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.get(self.url, {"para": "requisicion"})
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_solo_admite_get(self):
+        for metodo in ("post", "put", "patch", "delete"):
+            with self.subTest(metodo=metodo):
+                response = getattr(self.client, metodo)(self.url, {}, format="json")
+                self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_ordena_por_code_luego_puesto_y_pk_sin_ocultar_posiciones(self):
+        puesto_a = Puesto.objects.create(name="Auxiliar de Prueba")
+        posiciones = []
+        for code in reversed(tuple(self.estatus)):
+            # El nombre no determina ni la prioridad ni si está ocupada.
+            estatus = self.estatus[code]
+            estatus.name = "Nombre de catálogo cambiado"
+            estatus.save()
+            posiciones.append(self.create_posicion(estatus=estatus, puesto=self.puesto))
+        posiciones.extend(self.create_posicion(puesto=puesto_a) for _ in range(2))
+        prioridad = {
+            "vacante-activa": 0, "vacante-pendiente-de-confirmacion": 1,
+            "vacante-suspendida": 2, "vacante-eliminada": 4,
+        }
+        esperadas = sorted(posiciones, key=lambda p: (
+            prioridad.get(p.estatus.code, 3), p.puesto.name, p.pk,
+        ))
+        for para in ("requisicion", "descriptivo"):
+            with self.subTest(para=para):
+                datos = self._listar(para)["results"]
+                self.assertEqual([dato["id"] for dato in datos], [str(p.pk) for p in esperadas])
+                for dato in datos:
+                    self.assertEqual(dato["ocupada"], dato["estatus_code"].startswith(("colaborador-", "trainee-")))
+
+    def test_ordena_sin_tramite_primero_dentro_de_cada_prioridad_para_ambos_selectores(self):
+        puesto_a = Puesto.objects.create(name="Auxiliar de Prueba")
+        esperadas = {"requisicion": [], "descriptivo": []}
+        for code in (
+            "vacante-activa", "vacante-pendiente-de-confirmacion", "vacante-suspendida",
+            "colaborador-activo", "vacante-eliminada",
+        ):
+            con_requisicion = [self.create_posicion(estatus=self.estatus[code], puesto=puesto_a) for _ in range(2)]
+            con_descriptivo = [self.create_posicion(estatus=self.estatus[code], puesto=self.puesto) for _ in range(2)]
+            for posicion in con_requisicion:
+                # Un trámite ajeno también cuenta aunque no se pueda leer su id.
+                self.create_requisicion(posicion=posicion, created_by=self.otro)
+            for posicion in con_descriptivo:
+                self.crear_descriptivo(posicion)
+            con_requisicion.sort(key=lambda p: p.pk)
+            con_descriptivo.sort(key=lambda p: p.pk)
+            esperadas["requisicion"].extend(con_descriptivo + con_requisicion)
+            esperadas["descriptivo"].extend(con_requisicion + con_descriptivo)
+        for para in ("requisicion", "descriptivo"):
+            with self.subTest(para=para):
+                datos = self._listar(para)["results"]
+                self.assertEqual([dato["id"] for dato in datos], [str(p.pk) for p in esperadas[para]])
+
+    def test_devuelve_los_campos_y_la_etiqueta_existente(self):
+        posicion = self.create_posicion(puesto=self.puesto, area=self.area)
+        self.assertEqual(self._listar()["results"], [{
+            "id": str(posicion.pk), "etiqueta": posicion.etiqueta, "puesto": self.puesto.name,
+            "unidad": self.company_node.name, "area": self.area.name,
+            "estatus": self.estatus_vacante.name, "estatus_code": self.estatus_vacante.code,
+            "ocupada": False, "tramite_abierto": None,
+        }])
+
+    def test_conserva_posiciones_sin_puesto_ni_area(self):
+        posicion = self.create_posicion()
+        dato = self._listar()["results"][0]
+        self.assertEqual(dato["etiqueta"], posicion.etiqueta)
+        self.assertIsNone(dato["puesto"])
+        self.assertIsNone(dato["area"])
+
+    def test_marca_requisicion_abierta_solo_en_su_selector(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        requisicion = self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+        self.assertEqual(self._listar()["results"][0]["tramite_abierto"], {
+            "tipo": "requisicion", "id": str(requisicion.pk), "estado": self.estado_borrador.name,
+        })
+        self.assertIsNone(self._listar("descriptivo")["results"][0]["tramite_abierto"])
+
+    def test_requisicion_terminal_no_cuenta_como_abierta(self):
+        posicion = self.create_posicion()
+        self.create_requisicion(posicion=posicion, estado=self.estado_cubierta, created_by=self.colaborador)
+        self.assertIsNone(self._listar()["results"][0]["tramite_abierto"])
+
+    def test_requisicion_borrada_no_cuenta_como_abierta(self):
+        posicion = self.create_posicion()
+        self.create_requisicion(posicion=posicion, created_by=self.colaborador).delete()
+        self.assertIsNone(self._listar()["results"][0]["tramite_abierto"])
+
+    def test_privacidad_de_requisicion_para_ajeno_dueno_y_gestion(self):
+        posicion = self.create_posicion()
+        requisicion = self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+        for usuario in (self.otro, self.colaborador, self.gestor, self.administrador):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(user=usuario)
+                puede_leer = usuario != self.otro
+                self.assertEqual(self._listar()["results"][0]["tramite_abierto"], {
+                    "tipo": "requisicion", "id": str(requisicion.pk) if puede_leer else None,
+                    "estado": self.estado_borrador.name if puede_leer else None,
+                })
+
+    def test_requisicion_sin_dueno_tambien_oculta_id_y_estado_al_colaborador(self):
+        self.create_requisicion(posicion=self.create_posicion())
+        self.assertEqual(self._listar()["results"][0]["tramite_abierto"], {
+            "tipo": "requisicion", "id": None, "estado": None,
+        })
+
+    def test_marca_borrador_de_descriptivo_para_cualquier_autenticado(self):
+        posicion = self.create_posicion()
+        borrador = self.crear_descriptivo(posicion, created_by=self.gestor)
+        for usuario in (self.colaborador, self.gestor):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(user=usuario)
+                self.assertEqual(self._listar("descriptivo")["results"][0]["tramite_abierto"], {
+                    "tipo": "descriptivo", "id": str(borrador.pk), "estado": "Borrador",
+                })
+                self.assertIsNone(self._listar()["results"][0]["tramite_abierto"])
+
+    def test_descriptivo_congelado_no_cuenta_y_el_nuevo_borrador_si(self):
+        posicion = self.create_posicion()
+        congelado = self.crear_descriptivo(posicion)
+        congelado.congelar()
+        self.assertIsNone(self._listar("descriptivo")["results"][0]["tramite_abierto"])
+        borrador = self.crear_descriptivo(posicion)
+        self.assertEqual(self._listar("descriptivo")["results"][0]["tramite_abierto"]["id"], str(borrador.pk))
+
+    def test_descriptivo_borrado_no_cuenta_como_abierto(self):
+        posicion = self.create_posicion()
+        self.crear_descriptivo(posicion).delete()
+        self.assertIsNone(self._listar("descriptivo")["results"][0]["tramite_abierto"])
+
+    def test_busca_sin_acentos_en_los_mismos_campos_de_posiciones(self):
+        puesto = Puesto.objects.create(name="Operación")
+        jefe = self.create_posicion(puesto=Puesto.objects.create(name="Supervisión"))
+        self.company_node.name = "Organización"
+        self.company_node.save()
+        self.estatus_vacante.name = "Vacante con Confirmación"
+        self.estatus_vacante.save()
+        posicion = self.create_posicion(puesto=puesto, area=self.area, reports_to=jefe)
+        for para in ("requisicion", "descriptivo"):
+            for search in ("OPERACION", "produccion", "organizacion", "confirmacion", "supervision"):
+                with self.subTest(para=para, search=search):
+                    datos = self._listar(para, search=search)["results"]
+                    self.assertIn(str(posicion.pk), [dato["id"] for dato in datos])
+            self.assertEqual(self._listar(para, search="inexistente")["results"], [])
+        puesto.name = "Operacion"
+        puesto.save()
+        self.assertEqual(self._listar(search="operación")["results"][0]["id"], str(posicion.pk))
+
+    def test_busca_etiquetas_con_separadores_y_parentesis(self):
+        self.company_node.name = "GPA"
+        self.company_node.save()
+        posicion = self.create_posicion(
+            puesto=Puesto.objects.create(name="Operador de Soldadura"), area=self.area,
+        )
+        self.create_posicion(puesto=Puesto.objects.create(name="Auxiliar"))
+        posicion = Posicion.objects.get(pk=posicion.pk)
+        for para in ("requisicion", "descriptivo"):
+            for search in (
+                "Operador de Soldadura — GPA", "Operador de Soldadura (Produccion)",
+                "Operador - ( Produccion )", posicion.etiqueta,
+            ):
+                with self.subTest(para=para, search=search):
+                    datos = self._listar(para, search=search)["results"]
+                    self.assertEqual([dato["id"] for dato in datos], [str(posicion.pk)])
+            self.assertEqual(self._listar(para, search="Operador — inexistente")["results"], [])
+
+    def test_paginacion_por_defecto_personalizada_y_maximo(self):
+        Posicion.objects.bulk_create([
+            Posicion(organization_node=self.company_node, estatus=self.estatus_vacante, puesto=self.puesto)
+            for _ in range(205)
+        ])
+        datos = self._listar()
+        self.assertEqual(datos["count"], 205)
+        self.assertEqual(len(datos["results"]), 25)
+        self.assertIsNotNone(datos["next"])
+        primera = self._listar(page_size=8)
+        segunda = self._listar(page_size=8, page=2)
+        self.assertEqual(len(primera["results"]), 8)
+        self.assertEqual(len(segunda["results"]), 8)
+        self.assertTrue(
+            {dato["id"] for dato in primera["results"]}.isdisjoint(dato["id"] for dato in segunda["results"])
+        )
+        self.assertEqual(len(self._listar(page_size=999)["results"]), 200)
+
+    def test_numero_de_consultas_constante_con_8_y_40_posiciones(self):
+        # Aislamos las consultas del endpoint de la carga del rol del usuario.
+        self.colaborador.role
+        for cantidad in (8, 40):
+            for _ in range(cantidad - Posicion.objects.count()):
+                posicion = self.create_posicion(puesto=self.puesto, area=self.area)
+                self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+                self.crear_descriptivo(posicion, created_by=self.gestor)
+            for para in ("requisicion", "descriptivo"):
+                with self.subTest(cantidad=cantidad, para=para):
+                    # Un COUNT para paginar y un SELECT con relaciones y subconsultas.
+                    with self.assertNumQueries(2):
+                        datos = self._listar(para, page_size=200)
+                    self.assertEqual(len(datos["results"]), cantidad)
+                    self.assertTrue(all(dato["tramite_abierto"]["id"] for dato in datos["results"]))

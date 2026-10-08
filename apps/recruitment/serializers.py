@@ -55,6 +55,44 @@ class FullCleanModelSerializer(serializers.ModelSerializer):
         return self._save_validated_instance(instance)
 
 
+class TramiteAbiertoSerializer(serializers.Serializer):
+    tipo = serializers.CharField(read_only=True)
+    id = serializers.UUIDField(read_only=True, allow_null=True)
+    estado = serializers.CharField(read_only=True, allow_null=True)
+
+
+class PosicionElegibleSerializer(serializers.ModelSerializer):
+    etiqueta = serializers.CharField(read_only=True)
+    puesto = serializers.CharField(source="puesto.name", read_only=True, allow_null=True)
+    unidad = serializers.CharField(source="organization_node.name", read_only=True)
+    area = serializers.CharField(source="area.name", read_only=True, allow_null=True)
+    estatus = serializers.CharField(source="estatus.name", read_only=True)
+    estatus_code = serializers.CharField(source="estatus.code", read_only=True)
+    ocupada = serializers.SerializerMethodField()
+    tramite_abierto = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Posicion
+        fields = [
+            "id", "etiqueta", "puesto", "unidad", "area", "estatus", "estatus_code", "ocupada", "tramite_abierto",
+        ]
+        read_only_fields = fields
+
+    def get_ocupada(self, obj) -> bool:
+        return obj.estatus.code.startswith(("colaborador-", "trainee-"))
+
+    @extend_schema_field(TramiteAbiertoSerializer(allow_null=True))
+    def get_tramite_abierto(self, obj):
+        if not obj.tiene_tramite_abierto:
+            return None
+        para = self.context["request"].query_params["para"]
+        return {
+            "tipo": para,
+            "id": str(obj.tramite_id) if obj.tramite_id is not None else None,
+            "estado": obj.tramite_estado if para == "requisicion" else "Borrador",
+        }
+
+
 class EstadoRequisicionSerializer(serializers.ModelSerializer):
     class Meta:
         model = EstadoRequisicion

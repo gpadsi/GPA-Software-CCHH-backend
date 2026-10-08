@@ -9,6 +9,7 @@ from apps.recruitment.views import (
     EstadoRequisicionViewSet,
     EtapaAprobacionViewSet,
     HorarioACubrirViewSet,
+    PosicionesElegiblesViewSet,
     RangoEdadViewSet,
     RecursoAsignadoViewSet,
     RequisicionViewSet,
@@ -17,6 +18,7 @@ from apps.recruitment.views import (
 )
 
 router = DefaultRouter()
+router.register("posiciones-elegibles", PosicionesElegiblesViewSet, basename="posiciones-elegibles")
 router.register("estados", EstadoRequisicionViewSet)
 router.register("etapas-aprobacion", EtapaAprobacionViewSet)
 router.register("tipos-contrato-ofrecido", TipoContratoOfrecidoViewSet)

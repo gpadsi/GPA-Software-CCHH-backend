@@ -1,20 +1,26 @@
+import re
+
 import django_filters
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Prefetch
+from django.db.models import Case, Exists, IntegerField, OuterRef, Prefetch, Subquery, Value, When
 from django.http import FileResponse
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
-from rest_framework import permissions, status, viewsets
+from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
+from apps.core.filters import AccentInsensitiveSearchFilter
+from apps.core.pagination import StandardPagination
 from apps.core.permissions import (
     IsCapitalHumanoOrAdmin,
     IsCapitalHumanoOrAdminOrReadOnly,
     IsOwnerOrGestionRRHH,
+    es_gestion_rrhh,
     scope_to_own_unless_management,
 )
 from apps.positions.models import Posicion
+from apps.positions.views import PosicionViewSet
 from apps.recruitment.exports import generar_excel
 from apps.recruitment.exports_word import generar_word
 from apps.recruitment.models import (
@@ -42,6 +48,7 @@ from apps.recruitment.serializers import (
     EstadoRequisicionSerializer,
     EtapaAprobacionSerializer,
     HorarioACubrirSerializer,
+    PosicionElegibleSerializer,
     RangoEdadSerializer,
     RecursoAsignadoSerializer,
     RequisicionSerializer,
@@ -75,6 +82,76 @@ DiasPorLaborarViewSet = _catalog_viewset(DiasPorLaborar, DiasPorLaborarSerialize
 CompetenciaConductualViewSet = _catalog_viewset(CompetenciaConductual, CompetenciaConductualSerializer)
 RecursoAsignadoViewSet = _catalog_viewset(RecursoAsignado, RecursoAsignadoSerializer)
 RolConformidadViewSet = _catalog_viewset(RolConformidad, RolConformidadSerializer)
+
+
+class PosicionesElegiblesSearchFilter(AccentInsensitiveSearchFilter):
+    def get_search_terms(self, request):
+        # Las etiquetas copiadas traen separadores y paréntesis que no son
+        # palabras del puesto, la unidad o el área.
+        return [
+            token
+            for term in super().get_search_terms(request)
+            for token in re.split(r"[()]", term)
+            if any(char.isalnum() for char in token)
+        ]
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["recruitment"],
+        parameters=[OpenApiParameter("para", str, required=True, enum=["requisicion", "descriptivo"])],
+    ),
+)
+class PosicionesElegiblesViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Lista posiciones con su trámite abierto para elegir requisición o descriptivo."""
+
+    queryset = Posicion.objects.select_related("puesto", "organization_node", "area", "estatus")
+    serializer_class = PosicionElegibleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get"]
+    filter_backends = [PosicionesElegiblesSearchFilter]
+    search_fields = PosicionViewSet.search_fields
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        para = self.request.query_params.get("para")
+        if para not in ("requisicion", "descriptivo"):
+            raise ValidationError({"para": "Indica para=requisicion o para=descriptivo."})
+
+        queryset = super().get_queryset()
+        if para == "requisicion":
+            abiertos = Requisicion.objects.filter(
+                posicion_id=OuterRef("pk"), estado__es_terminal=False,
+            ).order_by("pk")
+            visibles = abiertos if es_gestion_rrhh(self.request.user) else scope_to_own_unless_management(
+                abiertos, self.request.user, "created_by",
+            )
+            queryset = queryset.annotate(
+                tiene_tramite_abierto=Exists(abiertos),
+                tramite_id=Subquery(visibles.values("pk")[:1]),
+                tramite_estado=Subquery(visibles.values("estado__name")[:1]),
+            )
+        else:
+            abiertos = DescriptivoPuesto.objects.filter(
+                posicion_id=OuterRef("pk"), congelado_en__isnull=True,
+            ).order_by("pk")
+            queryset = queryset.annotate(
+                tiene_tramite_abierto=Exists(abiertos),
+                tramite_id=Subquery(abiertos.values("pk")[:1]),
+            )
+
+        # Vacantes activa, pendiente y suspendida primero; el resto después y
+        # eliminadas al final. En cada prioridad van primero las posiciones
+        # sin trámite abierto; puesto y pk desempatan para paginar sin saltos.
+        return queryset.annotate(
+            prioridad_estatus=Case(
+                When(estatus__code="vacante-activa", then=Value(0)),
+                When(estatus__code="vacante-pendiente-de-confirmacion", then=Value(1)),
+                When(estatus__code="vacante-suspendida", then=Value(2)),
+                When(estatus__code="vacante-eliminada", then=Value(4)),
+                default=Value(3), output_field=IntegerField(),
+            ),
+        ).order_by("prioridad_estatus", "tiene_tramite_abierto", "puesto__name", "pk")
 
 
 @extend_schema_view(

@@ -508,3 +508,19 @@ Poder entrar al detalle de cada Posición desde ahí es un plan futuro.
 - **`files` con validación de contenido real (WebP, firma de archivo)** —
   existía en ambos repos abandonados. `apps.core` ya tiene adjuntos
   genéricos (`Attachment`) pero sin esa validación específica.
+
+**R1 de Vacantes — selector de posición (2026-10-08).** Primera rebanada del plan
+de UI de Vacantes. Se
+reprodujo el bloqueo de «Nuevo descriptivo» en el navegador: no era un fallo de
+capas ni de clics sino falta de retroalimentación (nada al enfocar, ceros y
+errores silenciosos, Enter sin efecto, homónimos idénticos y etiqueta no
+buscable por su guion largo). Back: `GET /recruitment/posiciones-elegibles/` (no
+oculta posiciones; vacantes sin trámite abierto primero; devuelve el trámite
+abierto sin filtrar de quién es una requisición ajena). Front: selector con
+sugerencias, estados «Buscando / Sin coincidencias / Reintentar», teclado y
+«Continuar borrador». 19 pruebas nuevas en el back y 22 en el front; todo en
+verde. **Sigue:** R2 (crear requisición o descriptivo desde Posiciones, también
+de posiciones ocupadas), R3 (Requisición como página de trabajo; depende de
+definir qué es «área solicitante» para RH), R4 (Descriptivo con secciones y
+aviso de cambios en la posición) y R5 (movimiento y rendimiento, con medición
+en modo profile). 
