@@ -276,7 +276,7 @@ def generar_excel(requisicion):
         "fecha_solicitud": requisicion.fecha_solicitud,
         "fecha_a_cubrir_vacante": requisicion.fecha_a_cubrir_vacante,
         "nombre_vacante": posicion.puesto.name if posicion.puesto_id else "",
-        "area_solicitante": requisicion.area_solicitante,
+        "area_solicitante": requisicion.area_solicitante.name if requisicion.area_solicitante_id else "",
         "unidad_negocio": posicion.organization_node.name,
         "empresa": empresa.name if empresa else "",
         "puesto_inmediato_superior": puesto_inmediato_superior,

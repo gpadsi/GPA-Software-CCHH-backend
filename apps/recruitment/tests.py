@@ -11,8 +11,9 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.db import IntegrityError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -27,6 +28,7 @@ from apps.recruitment.exports import PLANTILLAS_DIR, generar_excel
 from apps.recruitment.exports_word import PLANTILLA as PLANTILLA_WORD, _ancestro, _texto_de, generar_word
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    AreaSolicitante,
     CompetenciaConductual,
     ConformidadDescriptivo,
     DescriptivoPuesto,
@@ -130,6 +132,87 @@ class SeedRecruitmentCatalogsTests(TestCase):
 
         self.assertTrue(TipoRequisicion.objects.get(name="Nueva Posición").requiere_justificacion)
         self.assertFalse(TipoRequisicion.objects.get(name="Reemplazo").requiere_justificacion)
+
+
+class SeedAreasSolicitantesTests(RecruitmentTestDataMixin, TestCase):
+    def _area(self, nombre, posiciones=0, **kwargs):
+        area = Area.objects.create(code=f"area-{uuid.uuid4().hex[:20]}", name=nombre, **kwargs)
+        for _ in range(posiciones):
+            self.create_posicion(area=area)
+        return area
+
+    def _cargar(self, **kwargs):
+        salida = StringIO()
+        call_command("seed_areas_solicitantes", stdout=salida, **kwargs)
+        return salida.getvalue()
+
+    def test_deduplica_mayusculas_acentos_y_espacios_y_conserva_nombre_visible(self):
+        for nombre in ("PRODUCCION TECNICA", " producción   técnica ", "Producción técnica"):
+            self._area(nombre, posiciones=int(nombre == " producción   técnica "))
+        self._cargar()
+        self.assertEqual(AreaSolicitante.objects.count(), 1)
+        area = AreaSolicitante.objects.get()
+        self.assertEqual(area.nombre_normalizado, "produccion tecnica")
+        self.assertEqual(area.name, "producción técnica")
+
+    def test_prefiere_la_variante_con_mas_posiciones_aunque_este_en_mayusculas(self):
+        self._area("Pintura", posiciones=1)
+        self._area(" PINTURA ", posiciones=3)
+        salida = self._cargar()
+        self.assertEqual(AreaSolicitante.objects.get().name, "PINTURA")
+        self.assertIn("Creada: PINTURA (3 posiciones)", salida)
+
+    def test_desempata_prefiriendo_nombre_que_no_esta_en_mayusculas(self):
+        self._area("NOMINA", posiciones=1)
+        self._area("Nómina", posiciones=1)
+        self._cargar()
+        self.assertEqual(AreaSolicitante.objects.get().name, "Nómina")
+
+    def test_desempata_alfabeticamente_sin_depender_del_orden_de_creacion(self):
+        self._area("Nómina")
+        self._area("Nomina")
+        self._cargar()
+        self.assertEqual(AreaSolicitante.objects.get().name, "Nomina")
+
+    def test_dos_corridas_conservan_ids_y_no_renombran_existentes(self):
+        self._area("Compras")
+        existente = AreaSolicitante.objects.create(name="COMPRAS")
+        self._area("Legal")
+        self.assertIn("1 creadas; 1 omitidas", self._cargar())
+        antes = list(AreaSolicitante.objects.values_list("pk", "name", "is_active"))
+        self.assertIn("0 creadas; 2 omitidas", self._cargar())
+        self.assertEqual(list(AreaSolicitante.objects.values_list("pk", "name", "is_active")), antes)
+        existente.refresh_from_db()
+        self.assertEqual(existente.name, "COMPRAS")
+
+    def test_no_reactiva_ni_renombra_un_area_desactivada(self):
+        self._area("Capital Humano", posiciones=2)
+        existente = AreaSolicitante.objects.create(name="CAPITAL HUMANO", is_active=False)
+        self.assertIn("0 creadas; 1 omitidas", self._cargar())
+        existente.refresh_from_db()
+        self.assertFalse(existente.is_active)
+        self.assertEqual(existente.name, "CAPITAL HUMANO")
+        self.assertEqual(AreaSolicitante.objects.count(), 1)
+
+    def test_dry_run_muestra_creaciones_omisiones_y_posiciones_sin_escribir(self):
+        self._area("Compras", posiciones=2)
+        self._area("Legal", posiciones=1)
+        existente = AreaSolicitante.objects.create(name="LEGAL", is_active=False)
+        salida = self._cargar(dry_run=True)
+        self.assertIn("Crearía: Compras (2 posiciones)", salida)
+        self.assertIn("Omitiría: Legal (1 posiciones)", salida)
+        self.assertIn("1 áreas se crearían; 1 se omitirían", salida)
+        self.assertEqual(list(AreaSolicitante.objects.values_list("pk", "name", "is_active")),
+                         [(existente.pk, "LEGAL", False)])
+
+    def test_ignora_areas_inactivas_y_borradas_aunque_tengan_mas_posiciones(self):
+        self._area("Compras")
+        self._area("COMPRAS", posiciones=2, is_active=False)
+        self._area("compras", posiciones=3, is_deleted=True)
+        self._area("Legal", is_active=False)
+        self._area("Tesorería", is_deleted=True)
+        self._cargar()
+        self.assertEqual(list(AreaSolicitante.objects.values_list("name", flat=True)), ["Compras"])
 
 
 class RequisicionJustificacionTests(RecruitmentTestDataMixin, TestCase):
@@ -353,11 +436,12 @@ class RequisicionRoleAPITests(RecruitmentTestDataMixin, APITestCase):
         )
         self.client.force_authenticate(user=self.gerente)
         response = self.client.patch(
-            reverse("requisicion-detail", args=[propia.pk]), {"area_solicitante": "Mantenimiento"}, format="json",
+            reverse("requisicion-detail", args=[propia.pk]),
+            {"area_solicitante": AreaSolicitante.objects.create(name="Mantenimiento").pk}, format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         propia.refresh_from_db()
-        self.assertEqual(propia.area_solicitante, "Mantenimiento")
+        self.assertEqual(propia.area_solicitante.name, "Mantenimiento")
 
     def test_un_colaborador_no_puede_borrar_ni_su_propia_requisicion(self):
         propia = Requisicion.objects.create(
@@ -488,7 +572,8 @@ class RequisicionRoleAPITests(RecruitmentTestDataMixin, APITestCase):
         Requisicion.objects.filter(pk=propia.pk).update(estado=self.estado_cubierta)
         self.client.force_authenticate(user=self.gerente)
         respuesta = self.client.patch(
-            reverse("requisicion-detail", args=[propia.pk]), {"area_solicitante": "Mantenimiento"}, format="json",
+            reverse("requisicion-detail", args=[propia.pk]),
+            {"area_solicitante": AreaSolicitante.objects.create(name="Mantenimiento").pk}, format="json",
         )
         self.assertEqual(respuesta.status_code, status.HTTP_200_OK)
 
@@ -682,7 +767,7 @@ class GenerarExcelTests(RecruitmentTestDataMixin, TestCase):
         )
         requisicion = self.create_requisicion(
             posicion=posicion, tipo=self.tipo_reemplazo, estado=self.estado_borrador,
-            fecha_solicitud=date(2026, 1, 15), area_solicitante="Mantenimiento",
+            fecha_solicitud=date(2026, 1, 15), area_solicitante=AreaSolicitante.objects.create(name="Mantenimiento"),
             horario_a_cubrir=HorarioACubrir.objects.get(name="7:00 - 16:00"),
             disposicion_viajar=True,
             tipo_contrato_ofrecido=TipoContratoOfrecido.objects.get(name="Planta"),
@@ -1849,7 +1934,7 @@ class AdminDescargasOficialesTests(DescriptivoPuestoTestMixin, TestCase):
         )
 
     def test_una_requisicion_baja_su_excel_oficial(self):
-        requisicion = self.create_requisicion(area_solicitante="Mantenimiento")
+        requisicion = self.create_requisicion(area_solicitante=AreaSolicitante.objects.create(name="Mantenimiento"))
         response = self._accion(
             "admin:recruitment_requisicion_changelist", "descargar_excel_oficial", [requisicion.pk],
         )
@@ -1932,9 +2017,12 @@ class AdminListasPorTipoTests(RecruitmentTestDataMixin, TestCase):
         cls.admin_user = get_user_model().objects.create_superuser(
             username="admin-listas", email="admin-listas@example.com", password="test-pass",
         )
-        cls.reemplazo = cls.create_requisicion(tipo=cls.tipo_reemplazo, area_solicitante="De reemplazo")
+        cls.reemplazo = cls.create_requisicion(
+            tipo=cls.tipo_reemplazo, area_solicitante=AreaSolicitante.objects.create(name="De reemplazo"),
+        )
         cls.nueva = cls.create_requisicion(
-            tipo=cls.tipo_nueva, justificacion="Crecimiento.", area_solicitante="De nueva posición",
+            tipo=cls.tipo_nueva, justificacion="Crecimiento.",
+            area_solicitante=AreaSolicitante.objects.create(name="De nueva posición"),
         )
 
     def setUp(self):
@@ -1999,12 +2087,13 @@ class AdminListasPorTipoTests(RecruitmentTestDataMixin, TestCase):
 
     def test_el_tipo_no_se_puede_cambiar_desde_la_lista_de_un_tipo(self):
         url = reverse("admin:recruitment_requisicionreemplazo_change", args=[self.reemplazo.pk])
-        datos = self._datos_alta(self.reemplazo.posicion, tipo=str(self.tipo_nueva.pk), area_solicitante="Editada")
+        area = AreaSolicitante.objects.create(name="Editada")
+        datos = self._datos_alta(self.reemplazo.posicion, tipo=str(self.tipo_nueva.pk), area_solicitante=str(area.pk))
         datos["aprobaciones-INITIAL_FORMS"] = "0"
         respuesta = self.client.post(url, datos)
         self.assertEqual(respuesta.status_code, 302)
         self.reemplazo.refresh_from_db()
-        self.assertEqual(self.reemplazo.area_solicitante, "Editada")
+        self.assertEqual(self.reemplazo.area_solicitante, area)
         self.assertEqual(self.reemplazo.tipo, self.tipo_reemplazo)  # el tipo que llegó en el POST se ignora
 
     def test_cada_lista_baja_su_formulario_oficial(self):
@@ -2405,3 +2494,194 @@ class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
                 self.assertEqual(borrador.posicion_id, posicion.pk)
                 self.assertIsNone(borrador.congelado_en)
                 self.assertTrue(self._detalle(posicion, "descriptivo")["ocupada"])
+
+
+class AreasSolicitantesAPITests(RecruitmentTestDataMixin, APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        for rol in ("colaborador", "capital-humano", "admin"):
+            setattr(cls, rol.replace("-", "_"), get_user_model().objects.create_user(
+                username=f"area-{rol}", email=f"{rol}@example.com", password="test-password", role=UserRole.objects.get(code=rol),
+            ))
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.capital_humano)
+        self.url = reverse("areasolicitante-list")
+
+    def test_catalogo_arranca_vacio_sin_siembra(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"], [])
+
+    def test_modelo_limpia_espacios_y_unicidad_sin_acentos(self):
+        area = AreaSolicitante.objects.create(name="  Producción   técnica  ")
+        self.assertEqual(area.name, "Producción técnica")
+        for nombre in ("PRODUCCION TECNICA", " produccion  tecnica ", "Producción técnica"):
+            with self.subTest(nombre=nombre), transaction.atomic():
+                duplicada = AreaSolicitante(name=nombre)
+                with self.assertRaises(ValidationError):
+                    duplicada.full_clean()
+                with self.assertRaises(IntegrityError), transaction.atomic():
+                    duplicada.save()
+
+    def test_colaborador_lee_y_no_escribe(self):
+        area = AreaSolicitante.objects.create(name="Soldadura")
+        detalle = reverse("areasolicitante-detail", args=[area.pk])
+        self.client.force_authenticate(user=self.colaborador)
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.assertEqual(self.client.get(detalle).status_code, 200)
+        for metodo, url, payload in (
+            ("post", self.url, {"name": "Calidad"}),
+            ("patch", detalle, {"is_active": False}),
+            ("put", detalle, {"name": "Calidad"}),
+            ("delete", detalle, {}),
+        ):
+            with self.subTest(metodo=metodo):
+                self.assertEqual(getattr(self.client, metodo)(url, payload, format="json").status_code, 403)
+
+    def test_capital_humano_y_admin_crean_editan_y_desactivan(self):
+        for usuario in (self.capital_humano, self.admin):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(user=usuario)
+                response = self.client.post(self.url, {"name": f"  Área   {usuario.pk} "}, format="json")
+                self.assertEqual(response.status_code, 201, response.data)
+                area = AreaSolicitante.objects.get(pk=response.data["id"])
+                self.assertEqual(area.name, f"Área {usuario.pk}")
+                detalle = reverse("areasolicitante-detail", args=[area.pk])
+                cambio = self.client.patch(detalle, {"name": f"Nuevo {usuario.pk}", "is_active": False}, format="json")
+                self.assertEqual(cambio.status_code, 200, cambio.data)
+                area.refresh_from_db()
+                self.assertEqual(area.name, f"Nuevo {usuario.pk}")
+                self.assertFalse(area.is_active)
+                self.assertEqual(self.client.get(self.url, {"is_active": "true"}).data["count"], 0)
+
+    def test_anonimo_rechazado(self):
+        self.client.force_authenticate(user=None)
+        self.assertIn(self.client.get(self.url).status_code, (401, 403))
+
+    def test_duplicado_devuelve_la_existente_incluso_inactiva_y_al_renombrar(self):
+        existente = AreaSolicitante.objects.create(name="Producción", is_active=False)
+        otra = AreaSolicitante.objects.create(name="Calidad")
+        for metodo, url in (("post", self.url), ("patch", reverse("areasolicitante-detail", args=[otra.pk]))):
+            with self.subTest(metodo=metodo):
+                response = getattr(self.client, metodo)(url, {"name": "  PRODUCCION "}, format="json")
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.data, {"existente": {"id": existente.pk, "name": existente.name}})
+        self.assertEqual(AreaSolicitante.objects.count(), 2)
+
+    def test_no_borra_y_en_uso_devuelve_409_con_motivo(self):
+        area = AreaSolicitante.objects.create(name="Soldadura")
+        url = reverse("areasolicitante-detail", args=[area.pk])
+        self.assertEqual(self.client.delete(url).status_code, 405)
+        requisicion = self.create_requisicion(area_solicitante=area)
+        for borrada in (False, True):
+            with self.subTest(requisicion_borrada=borrada):
+                if borrada:
+                    requisicion.delete()
+                response = self.client.delete(url)
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("en uso", response.data["detail"])
+                self.assertTrue(AreaSolicitante.objects.filter(pk=area.pk).exists())
+
+    def test_busca_sin_acentos_filtra_activas_y_pagina(self):
+        activa = AreaSolicitante.objects.create(name="Producción")
+        AreaSolicitante.objects.create(name="Producción técnica", is_active=False)
+        for search in ("produccion", "PRODUCCIÓN"):
+            response = self.client.get(self.url, {"search": search, "is_active": "true", "page_size": 1})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["count"], 1)
+            self.assertEqual(response.data["results"][0]["id"], activa.pk)
+
+    def test_requisicion_acepta_area_valida_vacia_y_rechaza_inexistente(self):
+        area = AreaSolicitante.objects.create(name="Soldadura")
+        for valor in (area.pk, None, "", "omitida", 999999):
+            with self.subTest(valor=valor):
+                payload = {"posicion": str(self.create_posicion().pk), "tipo": self.tipo_reemplazo.pk,
+                    "fecha_solicitud": "2026-10-08"}
+                if valor != "omitida":
+                    payload["area_solicitante"] = valor
+                response = self.client.post(reverse("requisicion-list"), payload, format="json")
+                self.assertEqual(response.status_code, 400 if valor == 999999 else 201, response.data)
+                if response.status_code == 201:
+                    asignada = valor == area.pk
+                    self.assertEqual(response.data["area_solicitante"], area.pk if asignada else None)
+                    self.assertEqual(response.data["area_solicitante_nombre"], area.name if asignada else None)
+
+    def test_excel_de_ambos_tipos_escribe_el_nombre(self):
+        area = AreaSolicitante.objects.create(name="Mantenimiento")
+        for tipo in (self.tipo_reemplazo, self.tipo_nueva):
+            with self.subTest(tipo=tipo.code):
+                requisicion = self.create_requisicion(tipo=tipo, justificacion="Crecimiento", area_solicitante=area)
+                _, contenido = generar_excel(requisicion)
+                self.assertEqual(openpyxl.load_workbook(contenido).active["M4"].value, area.name)
+
+    def test_lista_requisiciones_consultas_constantes_con_8_y_40_filas(self):
+        self.capital_humano.role
+        for cantidad in (8, 40):
+            for numero in range(Requisicion.objects.count(), cantidad):
+                self.create_requisicion(area_solicitante=AreaSolicitante.objects.create(name=f"Departamento {numero}"))
+            with self.subTest(cantidad=cantidad):
+                # COUNT, SELECT con las relaciones y prefetch de aprobaciones.
+                with self.assertNumQueries(3):
+                    response = self.client.get(reverse("requisicion-list"), {"page_size": 200})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(len(response.data["results"]), cantidad)
+                    self.assertTrue(all(fila["area_solicitante_nombre"] for fila in response.data["results"]))
+
+    def test_busqueda_y_orden_de_requisiciones_usan_el_nombre_del_area(self):
+        soldadura = self.create_requisicion(area_solicitante=AreaSolicitante.objects.create(name="Soldadura"))
+        produccion = self.create_requisicion(area_solicitante=AreaSolicitante.objects.create(name="Producción"))
+        response = self.client.get(reverse("requisicion-list"), {"search": "produccion"})
+        self.assertEqual([fila["id"] for fila in response.data["results"]], [str(produccion.pk)])
+        response = self.client.get(reverse("requisicion-list"), {"ordering": "area_solicitante__name"})
+        self.assertEqual([fila["id"] for fila in response.data["results"]], [str(produccion.pk), str(soldadura.pk)])
+
+
+class AreaSolicitanteMigrationTests(TransactionTestCase):
+    anterior = [("recruitment", "0003_requisicion_proxies_por_tipo")]
+    nueva = [("recruitment", "0004_area_solicitante_catalogo")]
+
+    def _migrar(self, destino):
+        executor = MigrationExecutor(connection)
+        executor.migrate(destino)
+        return executor.loader.project_state(destino).apps
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(self._restaurar_esquema)
+        self.apps_anteriores = self._migrar(self.anterior)
+
+    def _restaurar_esquema(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+    def test_migra_textos_equivalentes_vacios_borrados_y_restaura_nombres(self):
+        apps = self.apps_anteriores
+        tenant = apps.get_model("organizations", "Tenant").objects.create(code="GPA", name="Grupo GPA")
+        nivel = apps.get_model("organizations", "OrganizationalLevel").objects.create(numero=1, code="empresa", name="Empresa")
+        nodo = apps.get_model("organizations", "OrganizationNode").objects.create(
+            tenant=tenant, level=nivel, code="MIG", name="Empresa de prueba",
+        )
+        estatus = apps.get_model("positions", "EstatusPosicion").objects.create(code="vacante-activa", name="Vacante Activa")
+        posicion = apps.get_model("positions", "Posicion").objects.create(organization_node=nodo, estatus=estatus)
+        tipo = apps.get_model("positions", "TipoRequisicion").objects.create(code="reemplazo", name="Reemplazo")
+        estado = apps.get_model("recruitment", "EstadoRequisicion").objects.create(code="cubierta", name="Cubierta", es_terminal=True)
+        RequisicionAnterior = apps.get_model("recruitment", "Requisicion")
+        textos = ["Soldadura", " soldadura ", "SOLDADURA", "Producción", " PRODUCCION ", "", "   "] + [""] * 39
+        ids = [RequisicionAnterior.objects.create(
+            posicion=posicion, tipo=tipo, estado=estado, fecha_solicitud=date(2026, 10, 8),
+            area_solicitante=texto, is_deleted=(numero == 2),
+        ).pk for numero, texto in enumerate(textos)]
+        nuevas = self._migrar(self.nueva)
+        Area = nuevas.get_model("recruitment", "AreaSolicitante")
+        RequisicionNueva = nuevas.get_model("recruitment", "Requisicion")
+        self.assertEqual(Area.objects.count(), 2)
+        soldadura = Area.objects.get(nombre_normalizado="soldadura")
+        self.assertEqual(list(RequisicionNueva.objects.filter(pk__in=ids[:3]).values_list("area_solicitante_id", flat=True)), [soldadura.pk] * 3)
+        self.assertTrue(all(RequisicionNueva.objects.get(pk=pk).area_solicitante_id is None for pk in ids[5:]))
+        esperados = {fila.pk: fila.area_solicitante.name if fila.area_solicitante_id else ""
+            for fila in RequisicionNueva.objects.select_related("area_solicitante")}
+        anteriores = self._migrar(self.anterior)
+        recuperados = anteriores.get_model("recruitment", "Requisicion")
+        self.assertEqual(dict(recuperados.objects.values_list("pk", "area_solicitante")), esperados)

@@ -2,6 +2,7 @@ from rest_framework.routers import DefaultRouter
 
 from apps.recruitment.views import (
     AprobacionRequisicionViewSet,
+    AreaSolicitanteViewSet,
     CompetenciaConductualViewSet,
     ConformidadDescriptivoViewSet,
     DescriptivoPuestoViewSet,
@@ -18,6 +19,7 @@ from apps.recruitment.views import (
 )
 
 router = DefaultRouter()
+router.register("areas-solicitantes", AreaSolicitanteViewSet)
 # El registro expone el listado y el detalle de contexto por UUID.
 router.register("posiciones-elegibles", PosicionesElegiblesViewSet, basename="posiciones-elegibles")
 router.register("estados", EstadoRequisicionViewSet)

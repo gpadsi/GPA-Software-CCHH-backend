@@ -7,11 +7,12 @@ from django.http import FileResponse
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import MethodNotAllowed, NotFound, ValidationError
 from rest_framework.response import Response
 
 from apps.core.filters import AccentInsensitiveSearchFilter
 from apps.core.pagination import StandardPagination
+from apps.core.viewsets import EditableCatalogViewSet
 from apps.core.permissions import (
     IsCapitalHumanoOrAdmin,
     IsCapitalHumanoOrAdminOrReadOnly,
@@ -26,6 +27,7 @@ from apps.recruitment.exports import generar_excel
 from apps.recruitment.exports_word import generar_word
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    AreaSolicitante,
     CompetenciaConductual,
     ConformidadDescriptivo,
     DescriptivoPuesto,
@@ -41,6 +43,7 @@ from apps.recruitment.models import (
 )
 from apps.recruitment.serializers import (
     AprobacionRequisicionSerializer,
+    AreaSolicitanteSerializer,
     CompetenciaConductualSerializer,
     ConformidadDescriptivoSerializer,
     CrearBorradorSerializer,
@@ -84,6 +87,41 @@ DiasPorLaborarViewSet = _catalog_viewset(DiasPorLaborar, DiasPorLaborarSerialize
 CompetenciaConductualViewSet = _catalog_viewset(CompetenciaConductual, CompetenciaConductualSerializer)
 RecursoAsignadoViewSet = _catalog_viewset(RecursoAsignado, RecursoAsignadoSerializer)
 RolConformidadViewSet = _catalog_viewset(RolConformidad, RolConformidadSerializer)
+
+
+@extend_schema_view(
+    list=extend_schema(tags=["recruitment"]),
+    retrieve=extend_schema(tags=["recruitment"]),
+    create=extend_schema(tags=["recruitment"]),
+    update=extend_schema(tags=["recruitment"]),
+    partial_update=extend_schema(tags=["recruitment"]),
+)
+class AreaSolicitanteViewSet(EditableCatalogViewSet):
+    """Catálogo de departamentos solicitantes; se desactivan, no se borran."""
+
+    queryset = AreaSolicitante.objects.all()
+    serializer_class = AreaSolicitanteSerializer
+    filterset_fields = ["is_active"]
+    search_fields = ["name"]
+    pagination_class = StandardPagination
+
+    def handle_exception(self, exc):
+        response = super().handle_exception(exc)
+        # DRF vuelve texto todo lo que viaja en un ValidationError; el cliente
+        # necesita el id numérico del área existente para seleccionarla.
+        existente = response.data.get("existente") if isinstance(response.data, dict) else None
+        if response.status_code == status.HTTP_400_BAD_REQUEST and isinstance(existente, dict):
+            existente["id"] = int(existente["id"])
+        return response
+
+    def destroy(self, request, *args, **kwargs):
+        area = self.get_object()
+        if Requisicion.all_objects.filter(area_solicitante=area).exists():
+            return Response({
+                "detail": "No se puede eliminar porque está en uso por requisiciones. Desactiva el área.",
+                "code": "protected",
+            }, status=status.HTTP_409_CONFLICT)
+        raise MethodNotAllowed("DELETE", detail="Las áreas solicitantes no se borran; se desactivan.")
 
 
 class PosicionesElegiblesSearchFilter(AccentInsensitiveSearchFilter):
@@ -197,6 +235,7 @@ class RequisicionViewSet(viewsets.ModelViewSet):
     """
     queryset = Requisicion.objects.select_related(
         "posicion__puesto", "posicion__organization_node", "posicion__area", "tipo", "estado", "created_by",
+        "area_solicitante",
     ).prefetch_related("aprobaciones").order_by("-fecha_solicitud")
     serializer_class = RequisicionSerializer
     permission_classes = [IsOwnerOrGestionRRHH]
@@ -205,11 +244,11 @@ class RequisicionViewSet(viewsets.ModelViewSet):
     # el área que la pide. La búsqueda corre DESPUÉS del filtro por dueño
     # (get_queryset), así que un Colaborador solo encuentra las suyas.
     search_fields = [
-        "posicion__puesto__name", "posicion__organization_node__name", "area_solicitante",
+        "posicion__puesto__name", "posicion__organization_node__name", "area_solicitante__name",
         "tipo__name", "estado__name",
     ]
     ordering_fields = [
-        "fecha_solicitud", "posicion__puesto__name", "tipo__name", "estado__name", "area_solicitante",
+        "fecha_solicitud", "posicion__puesto__name", "tipo__name", "estado__name", "area_solicitante__name",
     ]
 
     def get_queryset(self):

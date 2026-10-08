@@ -11,6 +11,7 @@ from apps.recruitment.exports import generar_excel
 from apps.recruitment.exports_word import generar_word
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    AreaSolicitante,
     CompetenciaConductual,
     ConformidadDescriptivo,
     DescriptivoPuesto,
@@ -85,6 +86,14 @@ class HorarioACubrirAdmin(NamedCatalogAdmin):
     form = catalog_form(HorarioACubrir)
 
 
+@admin.register(AreaSolicitante)
+class AreaSolicitanteAdmin(NamedCatalogAdmin):
+    form = catalog_form(AreaSolicitante)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 class AprobacionRequisicionInline(admin.TabularInline):
     model = AprobacionRequisicion
     extra = 0
@@ -92,9 +101,14 @@ class AprobacionRequisicionInline(admin.TabularInline):
 
 
 class _RequisicionAdminBase(AuditableAdminMixin, admin.ModelAdmin):
-    search_fields = ["posicion__puesto__name", "area_solicitante"]
+    search_fields = ["posicion__puesto__name", "area_solicitante__name"]
+    list_select_related = ["area_solicitante"]
     inlines = [AprobacionRequisicionInline]
     actions = ["descargar_excel_oficial"]
+
+    @admin.display(description="Área solicitante", ordering="area_solicitante__name")
+    def nombre_area_solicitante(self, obj):
+        return obj.area_solicitante.name if obj.area_solicitante_id else None
 
     def get_queryset(self, request):
         # Requisicion.objects ya no ve lo borrado (SoftDeleteModel) — el
@@ -111,9 +125,9 @@ class _RequisicionAdminBase(AuditableAdminMixin, admin.ModelAdmin):
 @admin.register(Requisicion)
 class RequisicionAdmin(_RequisicionAdminBase):
     """Todas las Requisiciones, de cualquier tipo (para auditar). Cada tipo tiene además su propia lista."""
-    list_display = ["posicion", "tipo", "estado", "fecha_solicitud", "is_deleted"]
+    list_display = ["posicion", "tipo", "estado", "nombre_area_solicitante", "fecha_solicitud", "is_deleted"]
     list_filter = ["tipo", "estado", "is_deleted"]
-    autocomplete_fields = ["posicion", "tipo", "estado", "horario_a_cubrir", "tipo_contrato_ofrecido"]
+    autocomplete_fields = ["posicion", "tipo", "estado", "horario_a_cubrir", "tipo_contrato_ofrecido", "area_solicitante"]
 
 
 class _RequisicionPorTipoAdmin(_RequisicionAdminBase):
@@ -124,9 +138,9 @@ class _RequisicionPorTipoAdmin(_RequisicionAdminBase):
     lista y a otro formulario; para eso está la lista "Requisiciones").
     """
     codigo_tipo = None  # TipoRequisicion.code
-    list_display = ["posicion", "estado", "fecha_solicitud", "is_deleted"]
+    list_display = ["posicion", "estado", "nombre_area_solicitante", "fecha_solicitud", "is_deleted"]
     list_filter = ["estado", "is_deleted"]
-    autocomplete_fields = ["posicion", "estado", "horario_a_cubrir", "tipo_contrato_ofrecido"]
+    autocomplete_fields = ["posicion", "estado", "horario_a_cubrir", "tipo_contrato_ofrecido", "area_solicitante"]
     readonly_fields = ["tipo"]
 
     def get_queryset(self, request):

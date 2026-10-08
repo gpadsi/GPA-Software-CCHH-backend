@@ -4,6 +4,8 @@
 # identico al anterior, solo omite la justificacion) y FO-C0-CH-04
 # (Descriptivo de Puesto, modelado al final de este archivo). Las
 # plantillas oficiales viven en apps/recruitment/plantillas_oficiales/.
+import unicodedata
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -64,6 +66,47 @@ class HorarioACubrir(NamedCatalog):
         verbose_name_plural = "Horarios a cubrir"
 
 
+def normalizar_nombre_area(nombre):
+    """Clave de comparación sin acentos, mayúsculas ni espacios sobrantes."""
+    return "".join(
+        letra for letra in unicodedata.normalize("NFKD", " ".join(nombre.split()).casefold())
+        if not unicodedata.combining(letra)
+    )
+
+
+class AreaSolicitante(NamedCatalog):
+    """Departamento que solicita la plaza, independiente de su ubicación física."""
+
+    # La clave persistida también impide duplicados en escrituras simultáneas;
+    # el nombre visible conserva sus acentos y solo limpia los espacios.
+    nombre_normalizado = models.CharField(max_length=300, unique=True, editable=False)
+
+    def _limpiar_nombre(self):
+        self.name = " ".join(self.name.split())
+        self.nombre_normalizado = normalizar_nombre_area(self.name)
+
+    def clean_fields(self, exclude=None):
+        self._limpiar_nombre()
+        super().clean_fields(exclude=exclude)
+
+    def clean(self):
+        super().clean()
+        # Los formularios del admin excluyen la clave técnica; validamos
+        # también el nombre visible para mostrar el error junto al campo.
+        if AreaSolicitante.objects.filter(nombre_normalizado=self.nombre_normalizado).exclude(pk=self.pk).exists():
+            raise ValidationError({"name": "Ya existe un área solicitante con ese nombre."})
+
+    def save(self, *args, **kwargs):
+        self._limpiar_nombre()
+        if kwargs.get("update_fields") is not None and "name" in kwargs["update_fields"]:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"nombre_normalizado"}
+        super().save(*args, **kwargs)
+
+    class Meta(NamedCatalog.Meta):
+        verbose_name = "Área solicitante"
+        verbose_name_plural = "Áreas solicitantes"
+
+
 class Requisicion(SoftDeleteModel):
     """
     El trámite de "necesitamos cubrir esta Posición". Confirmado
@@ -96,9 +139,10 @@ class Requisicion(SoftDeleteModel):
         null=True, blank=True, verbose_name="Fecha de entrega a Capital Humano",
     )
 
-    area_solicitante = models.CharField(
-        max_length=150, blank=True, verbose_name="Área solicitante",
-        help_text="El departamento que pide cubrir la plaza -- NO es Posicion.area (esa es la ubicación física).",
+    area_solicitante = models.ForeignKey(
+        AreaSolicitante, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="requisiciones", verbose_name="Área solicitante",
+        help_text="Departamento del catálogo que pide cubrir la plaza; no es Posicion.area (la nave).",
     )
     justificacion = models.TextField(
         blank=True, verbose_name="Justificación de la requisición",

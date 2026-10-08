@@ -1,5 +1,5 @@
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.settings import api_settings
@@ -10,6 +10,7 @@ from apps.positions.models import Posicion
 from apps.recruitment.exports import _empresa_de
 from apps.recruitment.models import (
     AprobacionRequisicion,
+    AreaSolicitante,
     CompetenciaConductual,
     ConformidadDescriptivo,
     DescriptivoPuesto,
@@ -24,6 +25,7 @@ from apps.recruitment.models import (
     Requisicion,
     RolConformidad,
     TipoContratoOfrecido,
+    normalizar_nombre_area,
 )
 
 
@@ -54,6 +56,37 @@ class FullCleanModelSerializer(serializers.ModelSerializer):
         for attribute, value in validated_data.items():
             setattr(instance, attribute, value)
         return self._save_validated_instance(instance)
+
+
+class AreaSolicitanteSerializer(FullCleanModelSerializer):
+    class Meta:
+        model = AreaSolicitante
+        fields = ["id", "code", "name", "is_active"]
+        read_only_fields = ["id", "code"]
+
+    def _validar_duplicado(self, nombre):
+        existentes = AreaSolicitante.objects.filter(nombre_normalizado=normalizar_nombre_area(nombre))
+        if self.instance is not None:
+            existentes = existentes.exclude(pk=self.instance.pk)
+        existente = existentes.first()
+        if existente is not None:
+            raise serializers.ValidationError({"existente": {"id": existente.pk, "name": existente.name}})
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if "name" in attrs:
+            attrs["name"] = " ".join(attrs["name"].split())
+            self._validar_duplicado(attrs["name"])
+        return attrs
+
+    def _save_validated_instance(self, instance):
+        try:
+            with transaction.atomic():
+                return super()._save_validated_instance(instance)
+        except (IntegrityError, serializers.ValidationError):
+            # La validación previa no basta si dos altas llegan a la vez.
+            self._validar_duplicado(instance.name)
+            raise
 
 
 class TramiteAbiertoSerializer(serializers.Serializer):
@@ -163,13 +196,14 @@ class RequisicionSerializer(FullCleanModelSerializer):
     posicion_etiqueta = serializers.CharField(source="posicion.etiqueta", read_only=True)
     creado_por = serializers.PrimaryKeyRelatedField(source="created_by", read_only=True)
     solicitante = serializers.SerializerMethodField()
+    area_solicitante_nombre = serializers.CharField(source="area_solicitante.name", read_only=True, allow_null=True)
 
     class Meta:
         model = Requisicion
         fields = [
             "id", "posicion", "posicion_etiqueta", "tipo", "estado", "creado_por", "solicitante",
             "fecha_solicitud", "fecha_a_cubrir_vacante", "fecha_entrega_a_capital_humano",
-            "area_solicitante", "justificacion",
+            "area_solicitante", "area_solicitante_nombre", "justificacion",
             "horario_a_cubrir", "idiomas_requeridos", "disposicion_viajar",
             "nivel_tabulador", "sueldo_mensual_compuesto", "sueldo_mensual_bruto", "sueldo_mensual_neto",
             "tipo_contrato_ofrecido",
