@@ -1,4 +1,5 @@
 import io
+import uuid
 from datetime import date
 from io import StringIO
 from unittest import mock
@@ -2272,3 +2273,135 @@ class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
                         datos = self._listar(para, page_size=200)
                     self.assertEqual(len(datos["results"]), cantidad)
                     self.assertTrue(all(dato["tramite_abierto"]["id"] for dato in datos["results"]))
+
+    def _detalle(self, posicion, para="requisicion"):
+        response = self.client.get(
+            reverse("posiciones-elegibles-detail", args=[posicion.pk]), {"para": para},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return response.data
+
+    def test_detalle_campos_empresa_reporta_a_y_tramites_para_ambos_usos(self):
+        unidad = OrganizationNode.objects.create(
+            level=OrganizationalLevel.objects.get(code="unidad_negocio"),
+            parent=self.company_node, code="CTX-UN", name="Unidad del contexto",
+        )
+        jefe = self.create_posicion(puesto=Puesto.objects.create(name="Jefatura de Producción"))
+        posicion = self.create_posicion(
+            organization_node=unidad, puesto=self.puesto, area=self.area, reports_to=jefe,
+        )
+        requisicion = self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+        borrador = self.crear_descriptivo(posicion)
+        for para, tramite, estado in (
+            ("requisicion", requisicion, self.estado_borrador.name),
+            ("descriptivo", borrador, "Borrador"),
+        ):
+            with self.subTest(para=para):
+                self.assertEqual(self._detalle(posicion, para), {
+                    "id": str(posicion.pk), "etiqueta": posicion.etiqueta,
+                    "puesto": self.puesto.name, "unidad": unidad.name, "area": self.area.name,
+                    "estatus": self.estatus_vacante.name, "estatus_code": self.estatus_vacante.code,
+                    "ocupada": False, "tramite_abierto": {
+                        "tipo": para, "id": str(tramite.pk), "estado": estado,
+                    },
+                    "empresa": self.company_node.name, "reporta_a": jefe.puesto.name,
+                })
+                listado = self._listar(para)["results"]
+                self.assertTrue(all("empresa" not in dato and "reporta_a" not in dato for dato in listado))
+
+    def test_detalle_relaciones_faltantes_y_jefe_sin_puesto_son_null(self):
+        # Los datos históricos pueden traer una unidad sin su empresa enlazada.
+        unidad = OrganizationNode.objects.create(
+            level=OrganizationalLevel.objects.get(code="unidad_negocio"),
+            code="CTX-HUERFANA", name="Unidad sin empresa",
+        )
+        jefe_sin_puesto = self.create_posicion()
+        for jefe in (None, jefe_sin_puesto):
+            posicion = self.create_posicion(organization_node=unidad, reports_to=jefe)
+            for para in ("requisicion", "descriptivo"):
+                with self.subTest(jefe=jefe, para=para):
+                    dato = self._detalle(posicion, para)
+                    self.assertIsNone(dato["empresa"])
+                    self.assertIsNone(dato["reporta_a"])
+                    self.assertIsNone(dato["puesto"])
+                    self.assertIsNone(dato["area"])
+                    self.assertIsNone(dato["tramite_abierto"])
+
+    def test_detalle_para_obligatorio_y_valido(self):
+        posicion = self.create_posicion()
+        url = reverse("posiciones-elegibles-detail", args=[posicion.pk])
+        for params in ({}, {"para": ""}, {"para": "otro"}):
+            with self.subTest(params=params):
+                response = self.client.get(url, params)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(str(response.data["para"]), "Indica para=requisicion o para=descriptivo.")
+
+    def test_detalle_inexistente_y_borrado_devuelven_404(self):
+        posicion = self.create_posicion()
+        Posicion.objects.filter(pk=posicion.pk).update(is_deleted=True)
+        for pk in (uuid.uuid4(), posicion.pk):
+            for para in ("requisicion", "descriptivo"):
+                with self.subTest(pk=pk, para=para):
+                    response = self.client.get(reverse("posiciones-elegibles-detail", args=[pk]), {"para": para})
+                    self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_detalle_privacidad_para_ajeno_dueno_y_gestion(self):
+        posicion = self.create_posicion()
+        requisicion = self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+        borrador = self.crear_descriptivo(posicion)
+        for usuario in (self.otro, self.colaborador, self.gestor, self.administrador):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(user=usuario)
+                puede_leer = usuario != self.otro
+                self.assertEqual(self._detalle(posicion)["tramite_abierto"], {
+                    "tipo": "requisicion", "id": str(requisicion.pk) if puede_leer else None,
+                    "estado": self.estado_borrador.name if puede_leer else None,
+                })
+                self.assertEqual(self._detalle(posicion, "descriptivo")["tramite_abierto"], {
+                    "tipo": "descriptivo", "id": str(borrador.pk), "estado": "Borrador",
+                })
+
+    def test_detalle_anonimo_rechazado(self):
+        posicion = self.create_posicion()
+        self.client.force_authenticate(user=None)
+        response = self.client.get(
+            reverse("posiciones-elegibles-detail", args=[posicion.pk]), {"para": "requisicion"},
+        )
+        self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_detalle_consultas_fijas_con_2_4_y_12_niveles(self):
+        self.colaborador.role
+        nivel = OrganizationalLevel.objects.get(code="unidad_negocio")
+        nodo = self.company_node
+        for profundidad in range(2, 13):
+            nodo = OrganizationNode.objects.create(
+                level=nivel, parent=nodo, code=f"CTX-{profundidad}", name=f"Unidad {profundidad}",
+            )
+            if profundidad not in (2, 4, 12):
+                continue
+            jefe = self.create_posicion(puesto=self.puesto)
+            posicion = self.create_posicion(organization_node=nodo, puesto=self.puesto, reports_to=jefe)
+            self.create_requisicion(posicion=posicion, created_by=self.colaborador)
+            self.crear_descriptivo(posicion)
+            for para in ("requisicion", "descriptivo"):
+                with self.subTest(profundidad=profundidad, para=para):
+                    # Un SELECT de posición y uno de su organización, sin consultas por nivel.
+                    with self.assertNumQueries(2):
+                        dato = self._detalle(posicion, para)
+                    self.assertEqual(dato["empresa"], self.company_node.name)
+                    self.assertEqual(dato["reporta_a"], self.puesto.name)
+                    self.assertIsNotNone(dato["tramite_abierto"]["id"])
+
+    def test_crear_borrador_de_colaborador_y_trainee_activos(self):
+        self.client.force_authenticate(user=self.gestor)
+        for code in ("colaborador-activo", "trainee-activo"):
+            with self.subTest(estatus=code):
+                posicion = self.create_posicion(puesto=self.puesto, estatus=self.estatus[code])
+                response = self.client.post(
+                    reverse("descriptivopuesto-crear-borrador"), {"posicion": str(posicion.pk)}, format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+                borrador = DescriptivoPuesto.objects.get(pk=response.data["id"])
+                self.assertEqual(borrador.posicion_id, posicion.pk)
+                self.assertIsNone(borrador.congelado_en)
+                self.assertTrue(self._detalle(posicion, "descriptivo")["ocupada"])

@@ -18,6 +18,7 @@ from apps.recruitment.views import (
 )
 
 router = DefaultRouter()
+# El registro expone el listado y el detalle de contexto por UUID.
 router.register("posiciones-elegibles", PosicionesElegiblesViewSet, basename="posiciones-elegibles")
 router.register("estados", EstadoRequisicionViewSet)
 router.register("etapas-aprobacion", EtapaAprobacionViewSet)

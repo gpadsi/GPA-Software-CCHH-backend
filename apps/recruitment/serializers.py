@@ -7,6 +7,7 @@ from rest_framework.settings import api_settings
 from apps.core.permissions import es_gestion_rrhh
 from apps.persons.models import Persona
 from apps.positions.models import Posicion
+from apps.recruitment.exports import _empresa_de
 from apps.recruitment.models import (
     AprobacionRequisicion,
     CompetenciaConductual,
@@ -91,6 +92,21 @@ class PosicionElegibleSerializer(serializers.ModelSerializer):
             "id": str(obj.tramite_id) if obj.tramite_id is not None else None,
             "estado": obj.tramite_estado if para == "requisicion" else "Borrador",
         }
+
+
+class PosicionContextoSerializer(PosicionElegibleSerializer):
+    """Contexto de una posición con la misma privacidad de trámites del listado."""
+
+    empresa = serializers.SerializerMethodField()
+    reporta_a = serializers.CharField(source="reports_to.puesto.name", read_only=True, allow_null=True)
+
+    class Meta(PosicionElegibleSerializer.Meta):
+        fields = PosicionElegibleSerializer.Meta.fields + ["empresa", "reporta_a"]
+        read_only_fields = fields
+
+    def get_empresa(self, obj) -> str | None:
+        empresa = _empresa_de(obj.organization_node)
+        return empresa.name if empresa else None
 
 
 class EstadoRequisicionSerializer(serializers.ModelSerializer):

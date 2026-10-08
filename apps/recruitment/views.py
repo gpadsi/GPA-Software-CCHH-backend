@@ -19,6 +19,7 @@ from apps.core.permissions import (
     es_gestion_rrhh,
     scope_to_own_unless_management,
 )
+from apps.organizations.models import OrganizationNode
 from apps.positions.models import Posicion
 from apps.positions.views import PosicionViewSet
 from apps.recruitment.exports import generar_excel
@@ -48,6 +49,7 @@ from apps.recruitment.serializers import (
     EstadoRequisicionSerializer,
     EtapaAprobacionSerializer,
     HorarioACubrirSerializer,
+    PosicionContextoSerializer,
     PosicionElegibleSerializer,
     RangoEdadSerializer,
     RecursoAsignadoSerializer,
@@ -101,9 +103,13 @@ class PosicionesElegiblesSearchFilter(AccentInsensitiveSearchFilter):
         tags=["recruitment"],
         parameters=[OpenApiParameter("para", str, required=True, enum=["requisicion", "descriptivo"])],
     ),
+    retrieve=extend_schema(
+        tags=["recruitment"],
+        parameters=[OpenApiParameter("para", str, required=True, enum=["requisicion", "descriptivo"])],
+    ),
 )
-class PosicionesElegiblesViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    """Lista posiciones con su trámite abierto para elegir requisición o descriptivo."""
+class PosicionesElegiblesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """Lista posiciones elegibles y devuelve su contexto al consultar una posición."""
 
     queryset = Posicion.objects.select_related("puesto", "organization_node", "area", "estatus")
     serializer_class = PosicionElegibleSerializer
@@ -113,12 +119,32 @@ class PosicionesElegiblesViewSet(mixins.ListModelMixin, viewsets.GenericViewSet)
     search_fields = PosicionViewSet.search_fields
     pagination_class = StandardPagination
 
+    def get_serializer_class(self):
+        return PosicionContextoSerializer if self.action == "retrieve" else super().get_serializer_class()
+
+    def get_object(self):
+        posicion = super().get_object()
+        # La unidad puede anidarse indefinidamente. Cargamos su organización
+        # con los niveles en un solo SELECT y enlazamos los padres en memoria:
+        # el detalle usa dos consultas como máximo, sin contar autenticación.
+        nodos = {
+            nodo.pk: nodo for nodo in OrganizationNode.objects.filter(
+                tenant_id=posicion.organization_node.tenant_id,
+            ).select_related("level").only("id", "parent", "name", "level__numero")
+        }
+        for nodo in nodos.values():
+            nodo.parent = nodos.get(nodo.parent_id)
+        posicion.organization_node = nodos[posicion.organization_node_id]
+        return posicion
+
     def get_queryset(self):
         para = self.request.query_params.get("para")
         if para not in ("requisicion", "descriptivo"):
             raise ValidationError({"para": "Indica para=requisicion o para=descriptivo."})
 
         queryset = super().get_queryset()
+        if self.action == "retrieve":
+            queryset = queryset.filter(is_deleted=False).select_related("reports_to__puesto")
         if para == "requisicion":
             abiertos = Requisicion.objects.filter(
                 posicion_id=OuterRef("pk"), estado__es_terminal=False,

@@ -510,8 +510,7 @@ Poder entrar al detalle de cada Posición desde ahí es un plan futuro.
   genéricos (`Attachment`) pero sin esa validación específica.
 
 **R1 de Vacantes — selector de posición (2026-10-08).** Primera rebanada del plan
-de UI de Vacantes. Se
-reprodujo el bloqueo de «Nuevo descriptivo» en el navegador: no era un fallo de
+de UI de Vacantes. Se reprodujo el bloqueo de «Nuevo descriptivo» en el navegador: no era un fallo de
 capas ni de clics sino falta de retroalimentación (nada al enfocar, ceros y
 errores silenciosos, Enter sin efecto, homónimos idénticos y etiqueta no
 buscable por su guion largo). Back: `GET /recruitment/posiciones-elegibles/` (no
@@ -524,3 +523,5 @@ de posiciones ocupadas), R3 (Requisición como página de trabajo; depende de
 definir qué es «área solicitante» para RH), R4 (Descriptivo con secciones y
 aviso de cambios en la posición) y R5 (movimiento y rendimiento, con medición
 en modo profile). 
+
+**R2 de Vacantes — entrada y relaciones (2026-10-08).** Segunda rebanada del plan de UI de Vacantes. Desde Posiciones, Capital Humano crea una requisición o un descriptivo con la posición ya elegida, y ambos formularios muestran una tarjeta con lo que se sabe de ella (puesto, empresa, unidad, área, estatus y a quién reporta; «Sin relación registrada» cuando falta) en lugar de pedir que se vuelva a capturar. Back: `GET /recruitment/posiciones-elegibles/<id>/?para=` devuelve esos datos con la misma privacidad del listado y un número fijo de consultas; el nombre de la persona que es jefe no se expone. Los descriptivos de posiciones ocupadas ya se podían crear y ahora hay una prueba que lo respalda. 8 pruebas nuevas en el back y 22 en el front; todo en verde. **Sigue:** R3 (Requisición como página de trabajo; depende de definir qué es «área solicitante» para RH), R4 y R5.
