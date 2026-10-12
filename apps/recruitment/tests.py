@@ -205,6 +205,18 @@ class SeedAreasSolicitantesTests(RecruitmentTestDataMixin, TestCase):
         self.assertEqual(list(AreaSolicitante.objects.values_list("pk", "name", "is_active")),
                          [(existente.pk, "LEGAL", False)])
 
+    def test_no_copia_las_areas_reservadas_que_la_sabana_usa_como_marca(self):
+        self._area("CONFIDENCIAL", posiciones=1)
+        self._area(" Confidencial ")
+        self._area("Compras")
+        salida = self._cargar()
+        self.assertEqual(list(AreaSolicitante.objects.values_list("name", flat=True)), ["Compras"])
+        self.assertIn("Reservada, no se copia: CONFIDENCIAL (1 posiciones)", salida)
+        self.assertIn("Reservadas (se registran a mano cuando se sepa el dato): 1", salida)
+        self.assertFalse(AreaSolicitante.objects.filter(nombre_normalizado="confidencial").exists())
+        self.assertIn("Reservada, no se copia", self._cargar(dry_run=True))
+        self.assertEqual(AreaSolicitante.objects.count(), 1)
+
     def test_ignora_areas_inactivas_y_borradas_aunque_tengan_mas_posiciones(self):
         self._area("Compras")
         self._area("COMPRAS", posiciones=2, is_active=False)

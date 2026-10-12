@@ -9,6 +9,11 @@ from django.db.models import Count
 from apps.locations.models import Area
 from apps.recruitment.models import AreaSolicitante, normalizar_nombre_area
 
+# La sábana marca con «CONFIDENCIAL», tanto en el puesto como en el área, las
+# vacantes cuyo puesto real aún no se conoce. No son un departamento: Capital
+# Humano las registra a mano cuando el dato se sepa, por eso no se copian.
+AREAS_RESERVADAS = frozenset({"confidencial"})
+
 
 class Command(BaseCommand):
     help = "Copia las áreas activas de la sábana al catálogo de áreas solicitantes (idempotente)."
@@ -34,9 +39,13 @@ class Command(BaseCommand):
                 elegidas.setdefault(normalizado, area)
 
         existentes = set(AreaSolicitante.objects.values_list("nombre_normalizado", flat=True))
-        creadas = omitidas = 0
+        creadas = omitidas = reservadas = 0
         for normalizado, area in sorted(elegidas.items()):
             nombre = " ".join(area.name.split())
+            if normalizado in AREAS_RESERVADAS:
+                reservadas += 1
+                self.stdout.write(f"Reservada, no se copia: {nombre} ({area.numero_posiciones} posiciones).")
+                continue
             created = normalizado not in existentes
             if created and not dry_run:
                 _, created = AreaSolicitante.objects.get_or_create(
@@ -55,3 +64,5 @@ class Command(BaseCommand):
             if dry_run else f"Áreas solicitantes: {creadas} creadas; {omitidas} omitidas."
         )
         self.stdout.write(self.style.SUCCESS(resumen))
+        if reservadas:
+            self.stdout.write(f"Reservadas (se registran a mano cuando se sepa el dato): {reservadas}.")
