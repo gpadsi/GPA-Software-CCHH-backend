@@ -14,6 +14,7 @@ from django.core.management import call_command
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -44,7 +45,7 @@ from apps.recruitment.models import (
     RolConformidad,
     TipoContratoOfrecido,
 )
-from apps.recruitment.services import copiar_version, crear_borrador
+from apps.recruitment.services import cambios_de_posicion, copiar_version, crear_borrador
 from apps.users.models import UserRole
 
 
@@ -1316,6 +1317,47 @@ class DescriptivoServiciosTests(DescriptivoPuestoTestMixin, TestCase):
         descriptivo = crear_borrador(self.create_posicion(), user=usuario)
         self.assertEqual(descriptivo.created_by, usuario)
 
+    def test_sin_cambios_en_la_posicion_no_hay_aviso(self):
+        jefe = self.create_posicion(puesto=self.puesto_jefe)
+        descriptivo = crear_borrador(self.create_posicion(puesto=self.puesto, reports_to=jefe))
+        self.assertEqual(cambios_de_posicion(descriptivo), [])
+
+    def test_los_cambios_de_la_posicion_se_comparan_campo_por_campo(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        self.assertEqual(descriptivo.reporta_a, "")
+
+        jefe = self.create_posicion(puesto=self.puesto_jefe)
+        posicion.reports_to = jefe
+        posicion.save()
+
+        self.assertEqual(
+            cambios_de_posicion(DescriptivoPuesto.objects.get(pk=descriptivo.pk)),
+            [{"campo": "reporta_a", "etiqueta": "Reporta a", "guardado": "", "actual": "Supervisor de Prueba"}],
+        )
+
+    def test_un_dato_que_la_posicion_ya_no_sabe_no_se_ofrece_para_borrar_el_de_la_version(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = self.crear_descriptivo(posicion, empresa="Empresa escrita a mano", reporta_a="Gerente")
+        # La Posición no tiene jefe registrado: no hay nada que incorporar en "Reporta a",
+        # aunque la versión traiga un valor; empresa y unidad sí difieren y sí se ofrecen.
+        self.assertEqual([c["campo"] for c in cambios_de_posicion(descriptivo)], ["empresa", "area_departamento"])
+
+    def test_espacios_de_mas_no_cuentan_como_cambio(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        descriptivo.empresa = f"  {descriptivo.empresa}  "
+        self.assertEqual(cambios_de_posicion(descriptivo), [])
+
+    def test_una_version_aprobada_nunca_tiene_cambios_pendientes(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        jefe = self.create_posicion(puesto=self.puesto_jefe)
+        posicion.reports_to = jefe
+        posicion.save()
+        descriptivo.congelar()
+        self.assertEqual(cambios_de_posicion(DescriptivoPuesto.objects.get(pk=descriptivo.pk)), [])
+
     def test_copiar_version_trae_todo_el_contenido_sin_tocar_la_original(self):
         posicion = self.create_posicion()
         original = self.crear_descriptivo(
@@ -1736,6 +1778,83 @@ class DescriptivoPuestoAPITests(DescriptivoPuestoTestMixin, APITestCase):
             self.client.get(url, {"posicion": "00000000-0000-0000-0000-000000000000"}).status_code,
             status.HTTP_404_NOT_FOUND,
         )
+
+    def test_estado_version_distingue_borrador_aprobada_e_historica(self):
+        posicion = self.create_posicion()
+        v1 = self.crear_descriptivo(posicion)
+        self.client.force_authenticate(user=self.colaborador)
+
+        def estados():
+            filas = self.client.get(reverse("descriptivopuesto-list"), {"posicion": str(posicion.pk)}).data["results"]
+            return {fila["version"]: fila["estado_version"] for fila in filas}
+
+        self.assertEqual(estados(), {1: "borrador"})
+        v1.congelar()
+        self.assertEqual(estados(), {1: "aprobada"})
+        v2 = copiar_version(v1)
+        self.assertEqual(estados(), {1: "aprobada", 2: "borrador"})
+        v2.congelar()
+        self.assertEqual(estados(), {1: "historica", 2: "aprobada"})
+        detalle = self.client.get(reverse("descriptivopuesto-detail", args=[v1.pk]))
+        self.assertEqual(detalle.data["estado_version"], "historica")
+
+    def test_estado_version_no_agrega_consultas_por_fila(self):
+        for _ in range(3):
+            self.crear_descriptivo(self.create_posicion()).congelar()
+        self.client.force_authenticate(user=self.colaborador)
+        url = reverse("descriptivopuesto-list")
+        with CaptureQueriesContext(connection) as pocas:
+            self.client.get(url)
+        for _ in range(3):
+            self.crear_descriptivo(self.create_posicion()).congelar()
+        with CaptureQueriesContext(connection) as muchas:
+            self.client.get(url)
+        self.assertEqual(len(muchas), len(pocas))
+
+    def test_cambios_posicion_compara_el_borrador_con_la_posicion_actual(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        url = reverse("descriptivopuesto-cambios-posicion", args=[descriptivo.pk])
+        self.client.force_authenticate(user=self.gestor)
+        self.assertEqual(self.client.get(url).data, {"cambios": []})
+
+        posicion.reports_to = self.create_posicion(puesto=Puesto.objects.create(name="Jefe de Prueba"))
+        posicion.save()
+        respuesta = self.client.get(url)
+        self.assertEqual(respuesta.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            respuesta.data["cambios"],
+            [{"campo": "reporta_a", "etiqueta": "Reporta a", "guardado": "", "actual": "Jefe de Prueba"}],
+        )
+
+    def test_cambios_posicion_es_de_solo_lectura_y_no_toca_el_borrador(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        posicion.reports_to = self.create_posicion(puesto=Puesto.objects.create(name="Jefe de Prueba"))
+        posicion.save()
+        url = reverse("descriptivopuesto-cambios-posicion", args=[descriptivo.pk])
+        self.client.force_authenticate(user=self.gestor)
+        self.assertEqual(self.client.post(url).status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.client.get(url)
+        self.assertEqual(DescriptivoPuesto.objects.get(pk=descriptivo.pk).reporta_a, "")
+
+    def test_cambios_posicion_de_una_version_aprobada_es_vacio(self):
+        posicion = self.create_posicion(puesto=self.puesto)
+        descriptivo = crear_borrador(posicion)
+        descriptivo.congelar()
+        posicion.reports_to = self.create_posicion(puesto=Puesto.objects.create(name="Jefe de Prueba"))
+        posicion.save()
+        self.client.force_authenticate(user=self.colaborador)
+        respuesta = self.client.get(reverse("descriptivopuesto-cambios-posicion", args=[descriptivo.pk]))
+        self.assertEqual(respuesta.data, {"cambios": []})
+
+    def test_cambios_posicion_exige_sesion_y_una_version_existente(self):
+        descriptivo = self.crear_descriptivo(self.create_posicion())
+        url = reverse("descriptivopuesto-cambios-posicion", args=[descriptivo.pk])
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.force_authenticate(user=self.gestor)
+        inexistente = reverse("descriptivopuesto-cambios-posicion", args=[uuid.uuid4()])
+        self.assertEqual(self.client.get(inexistente).status_code, status.HTTP_404_NOT_FOUND)
 
     def test_filtros_por_posicion_y_por_congelado(self):
         una, otra = self.create_posicion(), self.create_posicion()

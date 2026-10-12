@@ -353,13 +353,14 @@ class DescriptivoPuestoSerializer(FullCleanModelSerializer):
     recursos = serializers.PrimaryKeyRelatedField(many=True, required=False, queryset=RecursoAsignado.objects.all())
     conformidades = ConformidadDescriptivoSerializer(many=True, read_only=True)
     esta_congelado = serializers.BooleanField(read_only=True)
+    estado_version = serializers.SerializerMethodField()
 
     posicion_etiqueta = serializers.CharField(source="posicion.etiqueta", read_only=True)
 
     class Meta:
         model = DescriptivoPuesto
         fields = [
-            "id", "posicion", "posicion_etiqueta", "version", "congelado_en", "esta_congelado",
+            "id", "posicion", "posicion_etiqueta", "version", "congelado_en", "esta_congelado", "estado_version",
             "nombre_puesto", "empresa", "area_departamento", "reporta_a", "supervisa_a", "fecha_elaboracion",
             "edad", "edad_otro", "disponibilidad_viajar",
             "dias_por_laborar", "dias_por_laborar_otro", "horario", "horario_otro",
@@ -374,6 +375,22 @@ class DescriptivoPuestoSerializer(FullCleanModelSerializer):
         # full_clean() del modelo -- el validador automático de DRF no respeta
         # las condiciones de las UniqueConstraint (ver ConformidadDescriptivoSerializer).
         validators = []
+
+    @extend_schema_field(serializers.ChoiceField(choices=["borrador", "aprobada", "historica"]))
+    def get_estado_version(self, descriptivo):
+        """
+        Borrador (editable), Aprobada (la versión vigente: la aprobada más
+        reciente de la Posición) o Histórica (aprobada, pero ya hay una más
+        nueva). Se deriva de lo que ya existe; no se guarda. El listado la
+        trae anotada (`version_vigente`) para no consultar por fila.
+        """
+        if not descriptivo.esta_congelado:
+            return "borrador"
+        vigente = getattr(descriptivo, "version_vigente", None)
+        if vigente is None:
+            ultima = DescriptivoPuesto.vigente_de(descriptivo.posicion)
+            vigente = ultima.version if ultima else descriptivo.version
+        return "aprobada" if descriptivo.version >= vigente else "historica"
 
     def validate(self, attrs):
         # Cambiar la Posición de una versión ya creada rompería la numeración
@@ -429,6 +446,19 @@ class DescriptivoPuestoSerializer(FullCleanModelSerializer):
             descriptivo = super().update(instance, validated_data)
             self._guardar_listas(descriptivo, *listas)
         return descriptivo
+
+
+class CambioPosicionSerializer(serializers.Serializer):
+    """Un dato vinculado del borrador que difiere de lo que hoy dice la Posición."""
+
+    campo = serializers.CharField(read_only=True)
+    etiqueta = serializers.CharField(read_only=True)
+    guardado = serializers.CharField(read_only=True, allow_blank=True)
+    actual = serializers.CharField(read_only=True)
+
+
+class CambiosPosicionSerializer(serializers.Serializer):
+    cambios = CambioPosicionSerializer(many=True, read_only=True)
 
 
 class CrearBorradorSerializer(serializers.Serializer):

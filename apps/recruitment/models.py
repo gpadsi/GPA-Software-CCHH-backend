@@ -331,7 +331,7 @@ class RolConformidad(NamedCatalog):
 
 
 _MSJ_CONGELADA = (
-    "Esta versión del Descriptivo ya está congelada y no se puede modificar -- "
+    "Esta versión del Descriptivo ya está aprobada y no se puede modificar -- "
     "crea una versión nueva a partir de ella."
 )
 
@@ -455,7 +455,7 @@ class DescriptivoPuesto(SoftDeleteModel):
     def delete(self, *args, **kwargs):
         if self._congelado_en_bd():
             raise ValidationError(
-                "Una versión congelada no se borra -- queda como historial. "
+                "Una versión aprobada no se borra -- queda como historial. "
                 "Crea una versión nueva si hay que corregir algo."
             )
         super().delete(*args, **kwargs)
@@ -463,7 +463,7 @@ class DescriptivoPuesto(SoftDeleteModel):
     def congelar(self, user=None):
         """Aprueba el borrador: desde aquí es inmutable. Las conformidades se registran después."""
         if self.congelado_en is not None or self._congelado_en_bd():
-            raise ValidationError("Esta versión del Descriptivo ya estaba congelada.")
+            raise ValidationError("Esta versión del Descriptivo ya estaba aprobada.")
         self.congelado_en = timezone.now()
         if user is not None:
             self.updated_by = user
@@ -602,7 +602,7 @@ class ConformidadDescriptivo(SoftDeleteModel):
         super().clean()
         if self.descriptivo_id and not self.descriptivo.esta_congelado:
             raise ValidationError({
-                "descriptivo": "Solo se registra conformidad sobre una versión congelada -- congélala primero."
+                "descriptivo": "Solo se registra conformidad sobre una versión aprobada -- apruébala primero."
             })
         if self.rol_id and self.rol.requiere_persona and not self.persona_id:
             raise ValidationError({"persona": "Este rol exige indicar la persona que da su conformidad."})

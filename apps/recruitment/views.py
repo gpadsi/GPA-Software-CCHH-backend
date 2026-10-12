@@ -44,6 +44,7 @@ from apps.recruitment.models import (
 from apps.recruitment.serializers import (
     AprobacionRequisicionSerializer,
     AreaSolicitanteSerializer,
+    CambiosPosicionSerializer,
     CompetenciaConductualSerializer,
     ConformidadDescriptivoSerializer,
     CrearBorradorSerializer,
@@ -61,7 +62,11 @@ from apps.recruitment.serializers import (
     TipoContratoOfrecidoSerializer,
     _raise_drf_validation_error,
 )
-from apps.recruitment.services import copiar_version, crear_borrador as crear_borrador_desde_posicion
+from apps.recruitment.services import (
+    cambios_de_posicion,
+    copiar_version,
+    crear_borrador as crear_borrador_desde_posicion,
+)
 
 
 def _catalog_viewset(target_model, target_serializer_class):
@@ -346,6 +351,13 @@ class DescriptivoPuestoViewSet(viewsets.ModelViewSet):
     ).prefetch_related(
         "funciones", "indicadores", "competencias", "recursos",
         Prefetch("conformidades", queryset=ConformidadDescriptivo.objects.select_related("persona")),
+    ).annotate(
+        # Versión aprobada más reciente de la misma Posición: con ella se
+        # distingue "Aprobada" (la vigente) de "Histórica" sin una consulta por fila.
+        version_vigente=Subquery(
+            DescriptivoPuesto.objects.filter(posicion=OuterRef("posicion"), congelado_en__isnull=False)
+            .order_by("-version").values("version")[:1]
+        ),
     ).order_by("posicion", "-version")
     serializer_class = DescriptivoPuestoSerializer
     permission_classes = [IsCapitalHumanoOrAdminOrReadOnly]
@@ -417,6 +429,20 @@ class DescriptivoPuestoViewSet(viewsets.ModelViewSet):
         except DjangoValidationError as error:
             _raise_drf_validation_error(error)
         return Response(self._serializar(descriptivo))
+
+    @extend_schema(
+        tags=["recruitment"], responses={200: CambiosPosicionSerializer},
+        summary="Cambios de la Posición desde que se creó el borrador",
+        description=(
+            "Compara los datos vinculados del borrador (empresa, área / departamento, "
+            "reporta a) con lo que hoy dice la Posición, para que Capital Humano elija "
+            "cuáles incorporar. Una versión aprobada nunca cambia: devuelve una lista vacía. "
+            "Solo lee; incorporar un cambio es guardar el borrador con el valor nuevo."
+        ),
+    )
+    @action(detail=True, methods=["get"], url_path="cambios-posicion")
+    def cambios_posicion(self, request, pk=None):
+        return Response({"cambios": cambios_de_posicion(self.get_object())})
 
     @extend_schema(
         tags=["recruitment"],
