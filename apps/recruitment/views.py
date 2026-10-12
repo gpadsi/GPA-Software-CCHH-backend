@@ -164,7 +164,8 @@ class PosicionesElegiblesViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixi
         posicion = super().get_object()
         # La unidad puede anidarse indefinidamente. Cargamos su organización
         # con los niveles en un solo SELECT y enlazamos los padres en memoria:
-        # el detalle usa dos consultas como máximo, sin contar autenticación.
+        # el contexto usa dos consultas sin contar autenticación; la sugerencia
+        # de área para requisición añade como máximo un SELECT al catálogo.
         nodos = {
             nodo.pk: nodo for nodo in OrganizationNode.objects.filter(
                 tenant_id=posicion.organization_node.tenant_id,

@@ -178,7 +178,9 @@ class Requisicion(SoftDeleteModel):
 
     def clean(self):
         super().clean()
-        if self.tipo_id and self.tipo.requiere_justificacion and not self.justificacion.strip():
+        if (self.tipo_id and self.tipo.requiere_justificacion
+                and self.estado_id and self.estado.code != "borrador"
+                and not self.justificacion.strip()):
             raise ValidationError({"justificacion": "Este tipo de Requisición exige justificación."})
 
         if self.estado_id and not self.estado.es_terminal:

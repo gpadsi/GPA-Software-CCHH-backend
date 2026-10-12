@@ -127,19 +127,33 @@ class PosicionElegibleSerializer(serializers.ModelSerializer):
         }
 
 
+class AreaSolicitanteSugeridaSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(read_only=True)
+
+
 class PosicionContextoSerializer(PosicionElegibleSerializer):
     """Contexto de una posición con la misma privacidad de trámites del listado."""
 
     empresa = serializers.SerializerMethodField()
     reporta_a = serializers.CharField(source="reports_to.puesto.name", read_only=True, allow_null=True)
+    area_solicitante_sugerida = serializers.SerializerMethodField()
 
     class Meta(PosicionElegibleSerializer.Meta):
-        fields = PosicionElegibleSerializer.Meta.fields + ["empresa", "reporta_a"]
+        fields = PosicionElegibleSerializer.Meta.fields + ["empresa", "reporta_a", "area_solicitante_sugerida"]
         read_only_fields = fields
 
     def get_empresa(self, obj) -> str | None:
         empresa = _empresa_de(obj.organization_node)
         return empresa.name if empresa else None
+
+    @extend_schema_field(AreaSolicitanteSugeridaSerializer(allow_null=True))
+    def get_area_solicitante_sugerida(self, obj):
+        if self.context["request"].query_params["para"] != "requisicion" or obj.area_id is None:
+            return None
+        return AreaSolicitante.objects.filter(
+            is_active=True, nombre_normalizado=normalizar_nombre_area(obj.area.name),
+        ).values("id", "name").first()
 
 
 class EstadoRequisicionSerializer(serializers.ModelSerializer):

@@ -216,14 +216,20 @@ class SeedAreasSolicitantesTests(RecruitmentTestDataMixin, TestCase):
 
 
 class RequisicionJustificacionTests(RecruitmentTestDataMixin, TestCase):
-    def test_nueva_posicion_requires_justificacion(self):
+    def test_nueva_posicion_enviada_requires_justificacion(self):
         requisicion = Requisicion(
-            posicion=self.create_posicion(), tipo=self.tipo_nueva, estado=self.estado_borrador,
+            posicion=self.create_posicion(), tipo=self.tipo_nueva,
+            estado=EstadoRequisicion.objects.get(code="pendiente-de-autorizacion"),
             fecha_solicitud=date(2026, 1, 1),
         )
         with self.assertRaises(ValidationError) as context:
             requisicion.full_clean()
         self.assertIn("justificacion", context.exception.message_dict)
+
+    def test_borrador_de_nueva_posicion_se_guarda_sin_justificacion(self):
+        requisicion = self.create_requisicion(tipo=self.tipo_nueva)
+        self.assertEqual(requisicion.justificacion, "")
+        self.assertTrue(Requisicion.objects.filter(pk=requisicion.pk).exists())
 
     def test_reemplazo_does_not_require_justificacion(self):
         requisicion = Requisicion(
@@ -529,6 +535,41 @@ class RequisicionRoleAPITests(RecruitmentTestDataMixin, APITestCase):
         url = reverse("requisicion-list")
         self.assertEqual(self.client.get(url, {"estado": self.estado_cubierta.pk}).data["count"], 1)
         self.assertEqual(self.client.get(url, {"tipo": self.tipo_nueva.pk}).data["count"], 0)
+
+    def test_justificacion_se_exige_al_enviar_y_al_editar_una_enviada(self):
+        self.client.force_authenticate(user=self.gerente)
+        payload = {**self._payload(self.create_posicion()), "tipo": self.tipo_nueva.pk}
+        creada = self.client.post(reverse("requisicion-list"), payload, format="json")
+        self.assertEqual(creada.status_code, 201, creada.data)
+        url = reverse("requisicion-detail", args=[creada.data["id"]])
+        pendiente = EstadoRequisicion.objects.get(code="pendiente-de-autorizacion")
+        enviada = self.client.patch(url, {"estado": pendiente.pk}, format="json")
+        self.assertEqual(enviada.status_code, 400)
+        self.assertIn("justificacion", enviada.data)
+        self.assertEqual(Requisicion.objects.get(pk=creada.data["id"]).estado, self.estado_borrador)
+        enviada = self.client.patch(url, {"estado": pendiente.pk, "justificacion": "Segundo turno"}, format="json")
+        self.assertEqual(enviada.status_code, 200, enviada.data)
+        invalida = self.client.patch(url, {"justificacion": "  "}, format="json")
+        self.assertEqual(invalida.status_code, 400)
+        self.assertIn("justificacion", invalida.data)
+        # También valida los datos históricos sin justificación aunque el
+        # PATCH no cambie el estado ni toque ese campo.
+        Requisicion.objects.filter(pk=creada.data["id"]).update(justificacion="")
+        invalida = self.client.patch(url, {"idiomas_requeridos": "Inglés"}, format="json")
+        self.assertEqual(invalida.status_code, 400)
+        self.assertIn("justificacion", invalida.data)
+
+    def test_solicitante_sigue_sin_poder_elegir_estados_de_gestion(self):
+        propia = self._crear(self.gerente)
+        self.client.force_authenticate(user=self.gerente)
+        url = reverse("requisicion-detail", args=[propia.pk])
+        for estado in EstadoRequisicion.objects.exclude(code__in=("borrador", "pendiente-de-autorizacion")):
+            with self.subTest(estado=estado.code):
+                respuesta = self.client.patch(url, {"estado": estado.pk}, format="json")
+                self.assertEqual(respuesta.status_code, 400)
+                self.assertIn("estado", respuesta.data)
+                propia.refresh_from_db()
+                self.assertEqual(propia.estado, self.estado_borrador)
 
     def test_el_solicitante_no_se_puede_autorizar_a_si_mismo(self):
         autorizada = EstadoRequisicion.objects.get(code="autorizada")
@@ -2070,16 +2111,19 @@ class AdminListasPorTipoTests(RecruitmentTestDataMixin, TestCase):
         self.assertEqual(creada.tipo, self.tipo_reemplazo)
         self.assertEqual(creada.created_by, self.admin_user)
 
-    def test_alta_en_la_lista_de_nueva_posicion_exige_justificacion(self):
+    def test_alta_en_la_lista_de_nueva_posicion_exige_justificacion_al_enviar(self):
         posicion = self.create_posicion()
         url = reverse("admin:recruitment_requisicionnuevaposicion_add")
 
-        sin = self.client.post(url, self._datos_alta(posicion))
+        pendiente = EstadoRequisicion.objects.get(code="pendiente-de-autorizacion")
+        sin = self.client.post(url, self._datos_alta(posicion, estado=str(pendiente.pk)))
         self.assertEqual(sin.status_code, 200)  # vuelve al formulario con el error
         self.assertIn("justificacion", sin.context["adminform"].form.errors)
         self.assertFalse(Requisicion.objects.filter(posicion=posicion).exists())
 
-        con = self.client.post(url, self._datos_alta(posicion, justificacion="Se abre un segundo turno."))
+        con = self.client.post(url, self._datos_alta(
+            posicion, estado=str(pendiente.pk), justificacion="Se abre un segundo turno.",
+        ))
         self.assertEqual(con.status_code, 302)
         creada = Requisicion.objects.get(posicion=posicion)
         self.assertEqual(creada.tipo, self.tipo_nueva)
@@ -2394,9 +2438,11 @@ class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
                         "tipo": para, "id": str(tramite.pk), "estado": estado,
                     },
                     "empresa": self.company_node.name, "reporta_a": jefe.puesto.name,
+                    "area_solicitante_sugerida": None,
                 })
                 listado = self._listar(para)["results"]
-                self.assertTrue(all("empresa" not in dato and "reporta_a" not in dato for dato in listado))
+                self.assertTrue(all("empresa" not in dato and "reporta_a" not in dato
+                                    and "area_solicitante_sugerida" not in dato for dato in listado))
 
     def test_detalle_relaciones_faltantes_y_jefe_sin_puesto_son_null(self):
         # Los datos históricos pueden traer una unidad sin su empresa enlazada.
@@ -2424,6 +2470,22 @@ class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
                 response = self.client.get(url, params)
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
                 self.assertEqual(str(response.data["para"]), "Indica para=requisicion o para=descriptivo.")
+
+    def test_area_sugerida_coincide_sin_mayusculas_acentos_ni_espacios(self):
+        area = Area.objects.create(code="CTX-SUGERIDA", name="  PRODUCCION   TECNICA ")
+        sugerida = AreaSolicitante.objects.create(name="Producción técnica")
+        posicion = self.create_posicion(area=area)
+        self.assertEqual(self._detalle(posicion)["area_solicitante_sugerida"], {
+            "id": sugerida.pk, "name": sugerida.name,
+        })
+        self.assertIsNone(self._detalle(posicion, "descriptivo")["area_solicitante_sugerida"])
+
+    def test_area_sugerida_null_sin_area_sin_coincidencia_o_inactiva(self):
+        self.assertIsNone(self._detalle(self.create_posicion())["area_solicitante_sugerida"])
+        posicion = self.create_posicion(area=self.area)
+        self.assertIsNone(self._detalle(posicion)["area_solicitante_sugerida"])
+        AreaSolicitante.objects.create(name=self.area.name, is_active=False)
+        self.assertIsNone(self._detalle(posicion)["area_solicitante_sugerida"])
 
     def test_detalle_inexistente_y_borrado_devuelven_404(self):
         posicion = self.create_posicion()
@@ -2469,13 +2531,14 @@ class PosicionesElegiblesAPITests(DescriptivoPuestoTestMixin, APITestCase):
             if profundidad not in (2, 4, 12):
                 continue
             jefe = self.create_posicion(puesto=self.puesto)
-            posicion = self.create_posicion(organization_node=nodo, puesto=self.puesto, reports_to=jefe)
+            posicion = self.create_posicion(organization_node=nodo, puesto=self.puesto, area=self.area, reports_to=jefe)
             self.create_requisicion(posicion=posicion, created_by=self.colaborador)
             self.crear_descriptivo(posicion)
             for para in ("requisicion", "descriptivo"):
                 with self.subTest(profundidad=profundidad, para=para):
-                    # Un SELECT de posición y uno de su organización, sin consultas por nivel.
-                    with self.assertNumQueries(2):
+                    # Posición y organización, más un SELECT para la sugerencia
+                    # solo en requisición; ninguna consulta por nivel del árbol.
+                    with self.assertNumQueries(3 if para == "requisicion" else 2):
                         dato = self._detalle(posicion, para)
                     self.assertEqual(dato["empresa"], self.company_node.name)
                     self.assertEqual(dato["reporta_a"], self.puesto.name)
