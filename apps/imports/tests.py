@@ -1,4 +1,5 @@
 import tempfile
+from datetime import date
 from io import StringIO
 from pathlib import Path
 
@@ -8,9 +9,12 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
+from apps.employment.models import Contrato, Empleado
 from apps.imports.models import ImportBatch, RawValueAlias
 from apps.imports.normalize import normalize_text, resolve_against_catalog
-from apps.persons.models import Genero
+from apps.locations.models import Area
+from apps.persons.models import Escolaridad, EstadoCivil, Genero, Persona
+from apps.positions.models import Posicion
 
 
 class NormalizeTextTests(TestCase):
@@ -161,3 +165,105 @@ class ImportHorariosDuplicateGuardTests(TestCase):
             self._write_horarios_xlsx(path, no_empleado="ADV0002")  # sábana corregida, mismo nombre
             call_command("import_horarios", str(path), stdout=StringIO())
             self.assertEqual(ImportBatch.objects.count(), 2)
+
+
+class ImportPosicionesEmpleadoYPersonaTests(TestCase):
+    """
+    import_posiciones con un .xlsx real: cómo encuentra al Empleado de cada
+    fila (Nómina confirmada por nombre, nombre exacto cuando no hay Nómina,
+    nunca entre homónimos), qué rellena de la Persona y que un Área del
+    catálogo no se pierda por llamarse igual que una unidad.
+    """
+    ENCABEZADOS = [
+        "Nomina", "Empresa", "Unidad de Negocio ", "Área", "Nombre", "Genero ", "Escolaridad",
+        "Estado Civil", "Es padre", "Estatus", "Fecha de Ingreso como Colaborador",
+        "Fecha de Baja como Colaborador",
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        for seed in (
+            "seed_tenant", "seed_organizational_levels", "seed_gpa_companies",
+            "seed_position_catalogs", "seed_persons_catalogs", "seed_baja_catalogs",
+        ):
+            call_command(seed, stdout=StringIO())
+        Escolaridad.objects.create(name="Secundaria")
+        EstadoCivil.objects.create(name="Casado")
+        cls.area_cei = Area.objects.create(code="CEI", name="Cei")
+
+    @staticmethod
+    def _empleado(work_number, paterno, materno, nombre):
+        persona = Persona.objects.create(first_name=nombre, last_name_paternal=paterno, last_name_maternal=materno)
+        return Empleado.objects.create(persona=persona, work_number=work_number)
+
+    def _importar(self, *filas):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sabana.xlsx"
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Posiciones"
+            for j, encabezado in enumerate(self.ENCABEZADOS, start=1):
+                ws.cell(row=4, column=j, value=encabezado)
+            for i, fila in enumerate(filas, start=5):
+                for j, encabezado in enumerate(self.ENCABEZADOS, start=1):
+                    ws.cell(row=i, column=j, value=fila.get(encabezado.strip()))
+            wb.save(path)
+            call_command("import_posiciones", str(path), stdout=StringIO())
+
+    def test_fila_sin_nomina_se_liga_por_nombre_exacto_y_rellena_la_persona(self):
+        empleado = self._empleado("ADV9001", "PEREZ", "LOPEZ", "JUAN")
+        self._importar({
+            "Empresa": "GPA ADVANCED MANUFACTURING", "Unidad de Negocio": "Tooling",
+            "Nombre": "PÉREZ LÓPEZ JUAN", "Genero": "MASCULINO", "Escolaridad": "Secundaria",
+            "Estado Civil": "Casado", "Es padre": "Si", "Estatus": "COLABORADOR ACTIVO",
+            "Fecha de Ingreso como Colaborador": date(2026, 8, 24),
+        })
+
+        contrato = Contrato.objects.get(empleado=empleado)
+        self.assertEqual(contrato.fecha_ingreso, date(2026, 8, 24))
+        self.assertEqual(contrato.posicion.organization_node.name, "Tooling")
+        persona = Persona.objects.get(pk=empleado.persona_id)
+        self.assertEqual(persona.education_level.name, "Secundaria")
+        self.assertEqual(persona.marital_status.name, "Casado")
+        self.assertEqual(persona.gender.name, "Masculino")
+        self.assertTrue(persona.has_children)
+
+    def test_nomina_confirmada_por_nombre_crea_el_contrato_del_empleado_real(self):
+        empleado = self._empleado("ADV1072", "CONTRERAS", "TRUJILLO", "MIGUEL ANGEL")
+        self._importar({
+            "Nomina": "ADD0170", "Empresa": "GPA ADDITRONICS", "Nombre": "CONTRERAS TRUJILLO MIGUEL ANGEL",
+            "Estatus": "COLABORADOR BAJA", "Fecha de Ingreso como Colaborador": date(2025, 1, 6),
+            "Fecha de Baja como Colaborador": date(2026, 8, 20),
+        })
+
+        contrato = Contrato.objects.get(empleado=empleado)
+        self.assertEqual(contrato.fecha_baja, date(2026, 8, 20))
+
+    def test_nomina_confirmada_no_se_usa_si_el_nombre_ya_no_coincide(self):
+        self._empleado("ADV1072", "CONTRERAS", "TRUJILLO", "MIGUEL ANGEL")
+        self._importar({
+            "Nomina": "ADD0170", "Empresa": "GPA ADDITRONICS", "Nombre": "OTRA PERSONA DISTINTA",
+            "Estatus": "COLABORADOR BAJA", "Fecha de Ingreso como Colaborador": date(2025, 1, 6),
+        })
+
+        self.assertEqual(Posicion.objects.count(), 1)
+        self.assertFalse(Contrato.objects.exists())
+
+    def test_homonimos_no_se_ligan_aunque_solo_uno_sea_empleado(self):
+        self._empleado("ADV9002", "GOMEZ", "RUIZ", "ANA")
+        Persona.objects.create(first_name="ANA", last_name_paternal="GOMEZ", last_name_maternal="RUIZ")
+        self._importar({
+            "Empresa": "GPA ADVANCED MANUFACTURING", "Nombre": "GOMEZ RUIZ ANA",
+            "Estatus": "COLABORADOR ACTIVO", "Fecha de Ingreso como Colaborador": date(2026, 1, 5),
+        })
+
+        self.assertFalse(Contrato.objects.exists())
+
+    def test_area_del_catalogo_no_se_descarta_por_llamarse_igual_que_una_unidad(self):
+        # «CEI» es la unidad de CEI Aerospace Group (seed_gpa_companies) y
+        # también un Área ya confirmada en el catálogo.
+        self._importar({
+            "Empresa": "CEI AEROSPACE GROUP", "Área": "CEI", "Nombre": "VACP", "Estatus": "VACANTE ACTIVA",
+        })
+
+        self.assertEqual(Posicion.objects.get().area, self.area_cei)

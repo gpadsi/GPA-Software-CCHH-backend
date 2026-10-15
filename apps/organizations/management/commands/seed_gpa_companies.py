@@ -8,6 +8,12 @@ from apps.organizations.models import Company, OrganizationalLevel, Organization
 # reutilizan el mismo prefijo que ya usa GPA en el código de empleado
 # (ADV0001, CUT0010, etc.), no son un esquema inventado aquí.
 #
+# Nombres de las Unidades de Negocio tomados de la hoja «Configuración» de
+# la sábana del 2026-10-15: GPA renombró las «General X» y agregó Additronics,
+# Tooling e Industrial Services a Advanced Manufacturing. Este comando solo
+# crea lo que falta (get_or_create por código); no renombra lo que ya existe,
+# porque Capital Humano puede editar las unidades desde el organigrama.
+#
 # GT Steel y Sound Traffic SOLO se siembran como Empresa: no hay ninguna
 # Unidad de Negocio confirmada para ellas todavía. No se les inventa una
 # "General GT Steel" / "General Sound Traffic" aunque el patrón de las demás
@@ -19,33 +25,36 @@ COMPANIES = [
         ("GPA-ADV-01.03", "Mass Production"),
         ("GPA-ADV-01.04", "Sistemas de Corte"),
         ("GPA-ADV-01.05", "Parque de Innovación y Mentefactura"),
+        ("GPA-ADV-01.06", "Additronics"),
+        ("GPA-ADV-01.07", "Tooling"),
+        ("GPA-ADV-01.08", "Industrial Services"),
     ]),
     ("GPA-CUT-01", "GPA Cutting Systems", [
-        ("GPA-CUT-01.01", "General Cutting"),
+        ("GPA-CUT-01.01", "Cutting Systems"),
     ]),
     ("GPA-ADD-01", "GPA Additronics", [
-        ("GPA-ADD-01.01", "General Additronics"),
+        ("GPA-ADD-01.01", "Additronics"),
     ]),
     ("GPA-AZI-01", "GPA Azimatronics", [
-        ("GPA-AZI-01.01", "General Azimatronics"),
+        ("GPA-AZI-01.01", "Azimatronics"),
     ]),
     ("GPA-CEI-01", "CEI Aerospace Group", [
-        ("GPA-CEI-01.01", "General CEI"),
+        ("GPA-CEI-01.01", "CEI"),
     ]),
     ("GPA-TEC-01", "GPA Technical Services", [
-        ("GPA-TEC-01.01", "General Technical"),
+        ("GPA-TEC-01.01", "Technical Services"),
     ]),
     ("GPA-HOL-01", "GPA Holding Company", [
-        ("GPA-HOL-01.01", "General Holding"),
+        ("GPA-HOL-01.01", "Holding GPA"),
     ]),
     ("GPA-CIM-01", "CIMSA", [
-        ("GPA-CIM-01.01", "General CIMSA"),
+        ("GPA-CIM-01.01", "CIMSA"),
     ]),
     ("GPA-CMX-01", "CIMUX", [
-        ("GPA-CMX-01.01", "General CIMUX"),
+        ("GPA-CMX-01.01", "CIMUX"),
     ]),
     ("GPA-AGR-01", "GPA Agroindustry", [
-        ("GPA-AGR-01.01", "General Agroindustry"),
+        ("GPA-AGR-01.01", "Agroindustry"),
     ]),
     ("GPA-GTS-01", "GT Steel", []),
     ("GPA-SOU-01", "Sound Traffic", []),

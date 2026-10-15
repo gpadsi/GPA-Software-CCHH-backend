@@ -168,7 +168,7 @@ escritura); y que `/users/me/` traiga el id del Empleado de la cuenta.
 
 - `Company.legal_name` / `rfc` / `employer_registration` de las 12
   empresas — GPA no ha compartido ese expediente legal todavía.
-- `Posicion.reports_to` — 0 de 845 posiciones reales lo tienen resuelto;
+- `Posicion.reports_to` — 0 de 867 posiciones reales lo tienen resuelto;
   la columna "Supervisión" de la sábana mezcla nombres de persona y de
   unidad sin confirmar cuál es cuál (`Posicion.supervision_texto` guarda
   el texto crudo mientras tanto). **Mecanismo ya listo (2026-09-29):**
@@ -183,13 +183,19 @@ escritura); y que `/users/me/` traiga el id del Empleado de la cuenta.
 - El resto de los 13 campos de `_TEMPORARILY_OPTIONAL_FIELDS` (CURP/NSS/
   RFC/fecha de nacimiento/género de Persona, número de nómina, puesto y
   área de Posición, nave de Área, catorcena de las asignaciones).
-- 25 Contrato que el backfill de nombre dejó sin tocar a propósito por
-  ambigüedad genuina (2 a 28 Posiciones candidatas idénticas) — quedan
-  reportados en la salida del comando para revisión manual.
+- 114 de 580 Empleados sin Contrato vigente tras la sábana del
+  2026-10-15 (`reportar_altas_pendientes` los lista): 85 sin ningún
+  Contrato, casi todos de GT Steel, que no aparece en la sábana; y 29 con
+  todo cerrado, sobre todo bajas posteriores a la lista de Colaboradores
+  del 3 de septiembre y dos traspasos a CIMSA cuya nómina nueva (CIM0190,
+  CIM0193) todavía no existe como Empleado. Se resuelven con una lista de
+  Colaboradores más reciente.
 
 Nada de esto se resuelve inventando datos — se resuelve solo, sin tocar
 código, en cuanto GPA suba una sábana más completa (los comandos de
 import ya están escritos para conectarlo automáticamente).
+
+**Sábana del 15 de octubre de 2026 (2026-10-15).** Reemplaza a la del 23 de septiembre como referencia de avance. Se borraron las posiciones, sus contratos e historiales, las requisiciones migradas, el organigrama profundo y las áreas por nave, y se volvieron a cargar desde el archivo nuevo; personas, empleados, horarios, usuarios y catálogos no se tocaron porque la sábana no trae CURP ni RFC para recrearlos. Resultado: 867 posiciones (antes 845), 540 contratos (antes 467; 466 vigentes hoy, antes 435), 35 requisiciones migradas (antes 39) y 114 empleados sin contrato vigente (antes 145). El importador ahora encuentra al empleado de una fila sin nómina por su nombre completo exacto cuando ese nombre corresponde a una sola persona (49 filas: 43 activos, 32 de ellos traspasos de Additronics a Advanced con ingreso del 24 de agosto), y aplica al importar las 42 nóminas viejas confirmadas por nombre siempre que el nombre de la fila siga coincidiendo; con eso desaparecen los 25 contratos que antes quedaban ambiguos y el comando aparte que los reconstruía después de importar. También rellena escolaridad, estado civil y «Es padre» de la persona cuando la sábana los trae. La hoja «Configuración» trajo tres unidades nuevas en Advanced (Additronics, Tooling e Industrial Services) y nombres nuevos para las unidades «General X» (Cutting Systems, CEI, Holding GPA, Technical Services…); se aplicaron al organigrama y a `seed_gpa_companies`, que solo crea lo que falta y no renombra lo existente. Un área que ya está en el catálogo deja de descartarse por llamarse igual que una unidad, para que «Cei» y «Tooling» (57 posiciones) conserven su área. Se agregaron 3 puestos nuevos con el nombre que trae la sábana. Sin campo propio quedan NSS (un solo valor, que no es un NSS), Clave de Horario (vacía) y Gestora de Vacante (un solo valor; se modelará cuando GPA la llene); la hoja también nombra «Parque de Innovación y Mentefactura GPA» como empresa aparte, que no se creó porque ninguna posición la usa, y «Faltas Administrativas» (187 actas) sigue sin módulo. 5 pruebas nuevas del importador; `apps.imports` y `apps.organizations` en verde.
 
 ## 5. Lo que falta por ALCANCE — Permisos y Vacaciones (prototipado en `fastapi-gemini-capital-humano-demo`)
 

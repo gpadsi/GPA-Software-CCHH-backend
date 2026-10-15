@@ -18,7 +18,7 @@
 # Nunca sobrescribe un reports_to que ya tenga valor, y nunca adivina
 # cuando un alcance (unidad, ubicación) tiene 0 o 2+ candidatos a jefe —
 # se reporta para revisión manual, mismo criterio que
-# backfill_contratos_por_nombre.py.
+# la búsqueda por nombre de import_posiciones.py.
 from collections import defaultdict
 
 from django.core.exceptions import ValidationError

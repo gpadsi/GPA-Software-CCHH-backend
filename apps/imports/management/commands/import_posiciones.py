@@ -1,7 +1,9 @@
 # apps/imports/management/commands/import_posiciones.py
 # Importa la hoja "Posiciones" de la sábana de GPA: crea/actualiza Posicion,
-# crea Contrato para quien ya tenga Empleado (por Nómina), y hace backfill
-# de Persona.gender/birth_date cuando siguen vacíos.
+# crea Contrato para quien ya tenga Empleado (por Nómina, o por nombre
+# completo exacto cuando la fila no trae Nómina y el nombre corresponde a un
+# solo Empleado), y hace backfill de Persona (género, fecha de nacimiento,
+# escolaridad, estado civil) cuando siguen vacíos, y de «Es padre».
 #
 # Supervisión se deja SIN interpretar a propósito (confirmado 2026-09-24):
 # la columna mezcla nombres de persona con nombres de unidad, y GPA la irá
@@ -29,7 +31,7 @@ from apps.imports.models import ColaboradorRawRow, ImportBatch, PosicionRawRow, 
 from apps.imports.normalize import normalize_text, resolve_against_catalog
 from apps.locations.models import Area, Nave, Ubicacion
 from apps.organizations.models import OrganizationalLevel, OrganizationNode
-from apps.persons.models import Genero
+from apps.persons.models import Escolaridad, EstadoCivil, Genero, Persona
 from apps.positions.models import (
     AlcanceDePosicion,
     EstatusPosicion,
@@ -51,6 +53,62 @@ NOMINA_TYPOS = {
     "AVD1033": "ADV1033",
     "AVD1096": "ADV1096",
 }
+
+# Nómina de la sábana que no corresponde a ningún Empleado, pero cuyo nombre
+# completo coincide exacto con un Empleado real bajo otro número (numeración
+# vieja, sobre todo ADD de Additronics) — verificado 1 a 1 el 2026-09-28 y
+# otra vez contra la sábana del 2026-10-15. Se aplica al importar, con la
+# fila a la mano: antes se reconstruía la Posición después de importar y 25
+# de 42 quedaban ambiguas. Solo se usa si el nombre de la fila sigue
+# coincidiendo con el del Empleado; si no, la fila se reporta.
+NOMINA_CONFIRMADA_POR_NOMBRE = {
+    "ADV034": "ADV0634",
+    "ADD0004": "ADV1054",
+    "ADD0170": "ADV1072",
+    "ADD0064": "ADV1057",
+    "ADD0165": "ADV1070",
+    "ADD0153": "ADV1069",
+    "ADD0087": "ADV1059",
+    "ADD0191": "ADV1079",
+    "ADV0556": "HOL0005",
+    "CUT0476": "HOL0001",
+    "ADD0021": "ADV1056",
+    "ADD0183": "ADV1075",
+    "ADD0119": "ADV1064",
+    "ADD0175": "ADV1073",
+    "CUT0492": "HOL0002",
+    "ADD0116": "ADV1061",
+    "ADD0073": "ADV1058",
+    "ADD0187": "ADV1077",
+    "ADD0190": "ADV1078",
+    "AGR0009": "ADV0917",
+    "ADD0178": "ADV1074",
+    "ADD0185": "ADV1076",
+    "ADD0194": "ADV1080",
+    "ADD0071": "ADV0674",
+    "ADD0117": "ADV1062",
+    "ADD0133": "ADV1067",
+    "ADD0151": "ADV1068",
+    "CUT0472": "HOL0003",
+    "ADD0196": "ADV1081",
+    "ADV0563": "AZI0190",
+    "ADV0867": "AZI0191",
+    "AZI0186": "CUT0547",
+    "ADD0125": "ADV1065",
+    "ADD0127": "ADV1066",
+    "ADD0099": "ADV1060",
+    "ADV0560": "CEI0045",
+    "CUT0461": "HOL0004",
+    "CUT0524": "AZI0188",
+    "ADD0001": "ADV1053",
+    "ADD0167": "ADV1071",
+    "ADD0118": "ADV1063",
+    "ADD0017": "ADV1055",
+}
+
+# «Es padre» de la sábana -> Persona.has_children. Cualquier otro texto se
+# ignora (el campo no distingue «No» de «sin dato», así que no se adivina).
+ES_PADRE = {"SI": True, "NO": False}
 
 
 class Command(BaseCommand):
@@ -158,6 +216,16 @@ class Command(BaseCommand):
                 value = self._clean(self._get(row, col, column_name))
                 if value:
                     nombres_organizacion.add(normalize_text(value))
+        # Un Área que ya existe en el catálogo nunca se descarta como eco:
+        # el catálogo se sembró excluyendo los ecos, así que si coincide con
+        # una unidad es porque la unidad llegó después (ej. «Tooling» o «CEI»
+        # al renombrar las unidades «General X», 2026-10-15).
+        nombres_organizacion -= {
+            normalize_text(n, domain="area")
+            for n in Area.objects.filter(nave__isnull=True).values_list("name", flat=True)
+        }
+
+        personas_por_nombre = self._personas_por_nombre()
 
         for i, row in enumerate(data_rows, start=HEADER_ROW_INDEX + 2):
             if all(v is None for v in row):
@@ -212,19 +280,13 @@ class Command(BaseCommand):
                 continue
             stats["posiciones_creadas"] += 1
 
-            nomina = self._get(row, col, "Nomina")
-            empleado = None
-            if nomina:
-                work_number = str(nomina).strip().upper()
-                work_number = NOMINA_TYPOS.get(work_number, work_number)
-                empleado = Empleado.objects.filter(work_number=work_number).select_related("persona").first()
-                if empleado is None:
-                    stats["empleado_no_encontrado"] += 1
-                else:
-                    self._backfill_persona(empleado.persona, row, col, unresolved)
+            empleado = self._resolve_empleado(row, col, personas_por_nombre, stats, unresolved)
+            if empleado is not None:
+                self._backfill_persona(empleado.persona, row, col, unresolved)
 
             fecha_ingreso = self._to_date(self._get(row, col, "Fecha de Ingreso como Colaborador"))
             if empleado is not None and fecha_ingreso is not None:
+                work_number = empleado.work_number
                 origen_baja, _ = self._resolve_optional(row, col, "Origen de Baja", OrigenBaja.objects.all(), "origen_baja", unresolved)
                 causa_baja = None
                 causa_baja_raw = self._get(row, col, "Causa de Baja")
@@ -412,6 +474,57 @@ class Command(BaseCommand):
         except ValueError:
             return None
 
+    @staticmethod
+    def _personas_por_nombre():
+        """
+        {nombre completo normalizado: [Persona, ...]} de TODAS las Personas,
+        tengan Empleado o no: si dos comparten nombre, la fila es ambigua
+        aunque solo una de ellas sea Empleado.
+        """
+        indice = defaultdict(list)
+        for persona in Persona.objects.select_related("empleado"):
+            indice[normalize_text(str(persona))].append(persona)
+        return indice
+
+    def _resolve_empleado(self, row, col, personas_por_nombre, stats, unresolved):
+        """
+        El Empleado de la fila: por Nómina (con sus typos conocidos), por
+        Nómina confirmada por nombre (NOMINA_CONFIRMADA_POR_NOMBRE) o, si la
+        fila no trae Nómina, por nombre completo exacto cuando corresponde a
+        una sola Persona y esa Persona es Empleado. Nunca adivina entre
+        homónimos.
+        """
+        nombre = normalize_text(self._get(row, col, "Nombre"))
+        nomina = self._clean(self._get(row, col, "Nomina"))
+        if nomina:
+            work_number = nomina.upper()
+            work_number = NOMINA_TYPOS.get(work_number, work_number)
+            empleado = Empleado.objects.filter(work_number=work_number).select_related("persona").first()
+            if empleado is not None:
+                return empleado
+            confirmado = NOMINA_CONFIRMADA_POR_NOMBRE.get(work_number)
+            if confirmado:
+                empleado = Empleado.objects.filter(work_number=confirmado).select_related("persona").first()
+                if empleado is not None and normalize_text(str(empleado.persona)) == nombre:
+                    stats["empleado_por_nomina_confirmada"] += 1
+                    return empleado
+                unresolved["nomina_confirmada_sin_coincidir"].add(f"{work_number} -> {confirmado}")
+            stats["empleado_no_encontrado"] += 1
+            return None
+
+        if not nombre:
+            return None
+        personas = personas_por_nombre.get(nombre, [])
+        if len(personas) > 1:
+            unresolved["nombre_ambiguo"].add(nombre)
+            return None
+        if len(personas) == 1 and hasattr(personas[0], "empleado"):
+            stats["empleado_por_nombre"] += 1
+            empleado = personas[0].empleado
+            empleado.persona = personas[0]
+            return empleado
+        return None
+
     def _backfill_persona(self, persona, row, col, unresolved):
         changed = False
         if persona.gender_id is None:
@@ -428,6 +541,20 @@ class Command(BaseCommand):
             if bd is not None:
                 persona.birth_date = bd
                 changed = True
+        for field, column_name, model, domain in (
+            ("education_level", "Escolaridad", Escolaridad, "escolaridad"),
+            ("marital_status", "Estado Civil", EstadoCivil, "estado_civil"),
+        ):
+            if getattr(persona, f"{field}_id") is not None:
+                continue
+            obj, _ = self._resolve_optional(row, col, column_name, model.objects.all(), domain, unresolved)
+            if obj is not None:
+                setattr(persona, field, obj)
+                changed = True
+        es_padre = ES_PADRE.get(normalize_text(self._get(row, col, "Es padre")))
+        if es_padre is not None and persona.has_children != es_padre:
+            persona.has_children = es_padre
+            changed = True
         if changed:
             persona.full_clean()
             persona.save()
@@ -436,6 +563,10 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"Filas procesadas: {stats['filas']}. Posiciones creadas: {stats['posiciones_creadas']}. "
             f"Contratos creados: {stats['contratos_creados']}."
+        ))
+        self.stdout.write(self.style.SUCCESS(
+            f"Empleado encontrado por Nómina confirmada por nombre: {stats['empleado_por_nomina_confirmada']}. "
+            f"Por nombre completo (fila sin Nómina): {stats['empleado_por_nombre']}."
         ))
         self.stdout.write(self.style.WARNING(
             f"Sin organization_node (Empresa/Unidad de Negocio no reconocida): {stats['sin_organization_node']}. "
